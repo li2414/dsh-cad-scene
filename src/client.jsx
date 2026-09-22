@@ -124,7 +124,7 @@ function buildItemObject(item, category, scene) {
 
 // ── three.js canvas ─────────────────────────────────────────────────────────
 
-function SceneCanvas({ scene, selectedId, onSelect }) {
+function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) {
   const hostRef = useRef(null)
   const pickablesRef = useRef([])
 
@@ -150,8 +150,12 @@ function SceneCanvas({ scene, selectedId, onSelect }) {
 
     const group = new THREE.Group()
     const pickables = []
+    const cats = hiddenCats || {}
+    const layersOff = hiddenLayers || {}
     for (const category of ['racks', 'aisles', 'zones', 'agvs']) {
+      if (cats[category]) continue
       for (const item of scene[category] || []) {
+        if (layersOff[item.layer]) continue
         const object = buildItemObject(item, category, scene)
         if (!object) continue
         object.traverse((child) => {
@@ -274,7 +278,7 @@ function SceneCanvas({ scene, selectedId, onSelect }) {
       if (renderer.domElement.parentNode === host) host.removeChild(renderer.domElement)
       pickablesRef.current = []
     }
-  }, [scene])
+  }, [scene, hiddenCats, hiddenLayers])
 
   useEffect(() => {
     for (const object of pickablesRef.current) {
@@ -396,6 +400,34 @@ const IMPORT_CSS = `
 .cad-im-btn[data-busy='true']::after{animation:cad-im-shine 1s linear infinite}
 @keyframes cad-im-shine{to{left:120%}}
 @keyframes cad-im-shake{20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
+.cad-p-card{border:1px solid rgba(148,163,184,.22);border-radius:12px;background:rgba(148,163,184,.06);padding:10px 12px;font-size:12px}
+.cad-p-card h4{margin:0 0 8px;font-size:12px;letter-spacing:.04em;opacity:.85;display:flex;align-items:center;gap:6px}
+.cad-p-legend{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.cad-p-leg{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:8px;border:1px solid rgba(148,163,184,.18);background:rgba(8,16,34,.35);cursor:pointer;transition:all .18s;user-select:none}
+.cad-p-leg:hover{border-color:rgba(56,189,248,.5)}
+.cad-p-leg[data-off='true']{opacity:.38;filter:grayscale(.7)}
+.cad-p-dot{width:10px;height:10px;border-radius:3px;flex:none}
+.cad-p-leg b{font-weight:600}
+.cad-p-leg .cnt{margin-left:auto;opacity:.7;font-family:ui-monospace,Consolas,monospace}
+.cad-p-layers{max-height:184px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+.cad-p-layer{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;transition:background .15s}
+.cad-p-layer:hover{background:rgba(56,189,248,.1)}
+.cad-p-layer[data-off='true']{opacity:.4}
+.cad-p-layer .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Consolas,monospace;font-size:11px}
+.cad-p-layer .cnt{opacity:.6;font-family:ui-monospace,Consolas,monospace}
+.cad-p-badge{font-size:10px;padding:0 6px;border-radius:999px;border:1px solid rgba(148,163,184,.35);opacity:.75;flex:none}
+.cad-p-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;margin:6px 0 8px}
+.cad-p-bar span{height:100%}
+.cad-p-types{display:flex;flex-wrap:wrap;gap:4px}
+.cad-p-type{padding:1px 7px;border-radius:6px;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.2);font-family:ui-monospace,Consolas,monospace;font-size:10.5px}
+.cad-p-row{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+.cad-p-row .k{opacity:.6}
+.cad-p-log-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.cad-p-log-toggle .chev{transition:transform .2s;display:inline-block}
+.cad-p-log[data-open='true'] .cad-p-log-toggle .chev{transform:rotate(90deg)}
+.cad-p-logline{display:flex;gap:6px;padding:2px 0;line-height:1.5}
+.cad-p-warn{color:#fbbf24}
+.cad-p-err{color:#f87171}
 `
 
 function ensureImportStyles() {
@@ -484,6 +516,137 @@ function CategorySummary({ scene }) {
 
 // ── dual-pane center panel ──────────────────────────────────────────────────
 
+// ── left workbench cards ────────────────────────────────────────────────────
+
+function LegendCard({ scene, hidden, onToggle }) {
+  return (
+    <div className="cad-p-card">
+      <h4>图例 · 点击隐藏/显示</h4>
+      <div className="cad-p-legend">
+        {['racks', 'aisles', 'zones', 'agvs'].map((key) => (
+          <div key={key} className="cad-p-leg" data-off={hidden[key] ? 'true' : 'false'} onClick={() => onToggle(key)}>
+            <span className="cad-p-dot" style={{ background: hex(CATEGORY_COLORS[key]) }} />
+            <b>{CATEGORY_LABELS[key]}</b>
+            <span className="cnt">{(scene[key] || []).length}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function LayerManager({ scene, hiddenLayers, onToggleLayer }) {
+  const layers = Array.isArray(scene.layers) ? scene.layers : []
+  const counts = {}
+  for (const e of scene.entities || []) counts[e.layer] = (counts[e.layer] || 0) + 1
+  return (
+    <div className="cad-p-card">
+      <h4>图层 · {layers.length}（点击隐藏/显示）</h4>
+      <div className="cad-p-layers">
+        {layers.map((l) => (
+          <div key={l.name} className="cad-p-layer" data-off={hiddenLayers[l.name] ? 'true' : 'false'} onClick={() => onToggleLayer(l.name)}>
+            <span className="cad-p-dot" style={{ background: l.color > 0 ? hex(l.color) : '#64748b' }} />
+            <span className="nm">{l.name}</span>
+            {l.visible === false ? <span className="cad-p-badge">隐藏</span> : null}
+            {l.frozen ? <span className="cad-p-badge">冻结</span> : null}
+            <span className="cnt">{counts[l.name] || 0}</span>
+          </div>
+        ))}
+        {layers.length === 0 ? <div style={{ opacity: 0.6 }}>无图层表</div> : null}
+      </div>
+    </div>
+  )
+}
+
+const TYPE_PALETTE = ['#60a5fa', '#f97316', '#34d399', '#f472b6', '#a78bfa', '#facc15', '#22d3ee', '#fb7185', '#94a3b8']
+
+function StatsCard({ scene }) {
+  const meta = scene.meta || {}
+  const counts = {}
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  const eat = (p) => {
+    if (!p) return
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+  }
+  for (const e of scene.entities || []) {
+    counts[e.type] = (counts[e.type] || 0) + 1
+    eat(e.position); eat(e.center)
+    for (const v of e.vertices || []) eat(v)
+    for (const p of (e.controlPoints || []).concat(e.fitPoints || [], e.points || [])) eat(p)
+  }
+  const span = minX < Infinity ? { w: maxX - minX, h: maxY - minY } : null
+  const types = Object.entries(counts).sort((a, b) => b[1] - a[1])
+  const total = types.reduce((s, t) => s + t[1], 0) || 1
+  return (
+    <div className="cad-p-card">
+      <h4>图纸统计</h4>
+      <div className="cad-p-row">
+        <span className="k">实体总数</span>
+        <b>{meta.entityCount !== undefined ? meta.entityCount : (scene.entities || []).length}</b>
+      </div>
+      {meta.truncated ? <div className="cad-p-logline cad-p-warn">⚠ 实体超上限已截断</div> : null}
+      <div className="cad-p-bar">
+        {types.map((t, i) => (
+          <span key={t[0]} style={{ width: (t[1] / total * 100) + '%', background: TYPE_PALETTE[i % TYPE_PALETTE.length] }} />
+        ))}
+      </div>
+      <div className="cad-p-types">
+        {types.map((t, i) => (
+          <span key={t[0]} className="cad-p-type"><i style={{ color: TYPE_PALETTE[i % TYPE_PALETTE.length], fontStyle: 'normal' }}>■</i> {t[0]}×{t[1]}</span>
+        ))}
+      </div>
+      {span ? (
+        <div className="cad-p-row" style={{ marginTop: 6 }}>
+          <span className="k">图幅范围</span>
+          <b>{Math.round(span.w * 10) / 10} × {Math.round(span.h * 10) / 10}</b>
+        </div>
+      ) : null}
+      <div className="cad-p-row"><span className="k">块定义</span><b>{(meta.blocks || []).length}</b></div>
+    </div>
+  )
+}
+
+const RENDERABLE_TYPES = new Set(['INSERT', 'LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE'])
+
+function ParseLog({ scene }) {
+  const [open, setOpen] = useState(false)
+  const meta = scene.meta || {}
+  const counts = {}
+  for (const e of scene.entities || []) {
+    if (!RENDERABLE_TYPES.has(e.type)) counts[e.type] = (counts[e.type] || 0) + 1
+  }
+  const lines = []
+  const fmt = String(meta.format || 'dxf')
+  lines.push({ kind: 'info', text: '解析格式: ' + fmt + (fmt.indexOf('dwg') === 0 ? '（经外部转换器）' : '（浏览器内解析）') })
+  if (meta.truncated) lines.push({ kind: 'warn', text: '实体超上限已截断，仅保留前 ' + (scene.entities || []).length + ' 个' })
+  const unrendered = Object.entries(counts)
+  if (unrendered.length > 0) {
+    lines.push({ kind: 'warn', text: '仅解析、未在 3D 绘制: ' + unrendered.map((e) => e[0] + '×' + e[1]).join('、') })
+  }
+  lines.push({ kind: 'info', text: '图层 ' + ((scene.layers || []).length) + ' 个 · 块定义 ' + ((meta.blocks || []).length) + ' 个' })
+  if (meta.source) lines.push({ kind: 'info', text: meta.source })
+  const warns = lines.filter((l) => l.kind === 'warn').length
+  return (
+    <div className="cad-p-card cad-p-log" data-open={open ? 'true' : 'false'}>
+      <div className="cad-p-log-toggle" onClick={() => setOpen(!open)}>
+        <span className="chev">▶</span>
+        <h4 style={{ margin: 0, flex: 1 }}>解析日志</h4>
+        <span className="cnt">{warns > 0 ? warns + ' 项提示' : '正常'}</span>
+      </div>
+      {open ? (
+        <div style={{ marginTop: 8 }}>
+          {lines.map((l, i) => (
+            <div key={i} className={'cad-p-logline' + (l.kind === 'warn' ? ' cad-p-warn' : '')}>
+              <span>{l.kind === 'warn' ? '⚠' : 'ℹ'}</span><span>{l.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function CadSceneBuilderPanel() {
   const [fileState, setFileState] = useState(null)
   const fileRef = useRef(null)
@@ -492,14 +655,21 @@ function CadSceneBuilderPanel() {
   const [busy, setBusy] = useState(false)
   const [selection, setSelection] = useState(null)
   const [dragging, setDragging] = useState(false)
+  const [hiddenCats, setHiddenCats] = useState({})
+  const [hiddenLayers, setHiddenLayers] = useState({})
 
   useEffect(() => { ensureImportStyles() }, [])
+
+  const toggleCat = (key) => setHiddenCats((h) => Object.assign({}, h, { [key]: !h[key] }))
+  const toggleLayer = (name) => setHiddenLayers((h) => Object.assign({}, h, { [name]: !h[name] }))
 
   const acceptFile = (file) => {
     if (!file) return
     fileRef.current = file
     setScene(null)
     setSelection(null)
+    setHiddenCats({})
+    setHiddenLayers({})
     setFileState({ name: file.name, size: file.size, status: 'ready', error: null })
   }
 
@@ -604,22 +774,15 @@ function CadSceneBuilderPanel() {
             {busy ? '解析中…' : '解析'}
           </button>
         </div>
-        {scene ? (
-          <div style={styles.info}>
-            <div><span style={styles.label}>货架</span>{(scene.racks || []).length}</div>
-            <div><span style={styles.label}>通道</span>{(scene.aisles || []).length}</div>
-            <div><span style={styles.label}>区域</span>{(scene.zones || []).length}</div>
-            <div><span style={styles.label}>AGV</span>{(scene.agvs || []).length}</div>
-            {scene.meta && Array.isArray(scene.meta.blocks) ? (
-              <div><span style={styles.label}>块定义</span>{scene.meta.blocks.map((b) => b.name).join('、') || '无'}</div>
-            ) : null}
-          </div>
-        ) : null}
+        {scene ? <LegendCard scene={scene} hidden={hiddenCats} onToggle={toggleCat} /> : null}
+        {scene ? <LayerManager scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
+        {scene ? <StatsCard scene={scene} /> : null}
+        {scene ? <ParseLog scene={scene} /> : null}
       </div>
       <div style={styles.col}>
         <h3 style={styles.title}>Three.js 3D 场景显示区</h3>
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
-          <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
+          <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
           {!scene ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
               解析后实体将叠加到场景中（左键旋转、滚轮缩放、右键平移，点击实体查看详情）
