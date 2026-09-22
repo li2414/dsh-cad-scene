@@ -322,6 +322,10 @@ async function parseFile(file) {
 const styles = {
   wrap: { display: 'flex', gap: 12, height: '100%', minHeight: 0, padding: 12, boxSizing: 'border-box' },
   col: { flex: 1, display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0, minHeight: 0 },
+  colLeft: {
+    flex: '0 0 33%', maxWidth: '33%', display: 'flex', flexDirection: 'column',
+    gap: 10, minWidth: 0, minHeight: 0, overflowY: 'auto', paddingRight: 2,
+  },
   title: { margin: 0, fontSize: 14 },
   drop: {
     border: '2px dashed rgba(148,163,184,0.4)', borderRadius: 10, padding: 24,
@@ -530,7 +534,7 @@ function CadSceneBuilderPanel() {
 
   return (
     <div style={styles.wrap}>
-      <div style={styles.col}>
+      <div style={styles.colLeft}>
         <h3 style={styles.title}>CAD 文件导入区</h3>
         <div
           className="cad-im-portal"
