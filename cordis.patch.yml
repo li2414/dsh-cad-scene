@@ -1,0 +1,13 @@
+# dsh-cad-scene bundle patch: inserts the dual-face plugin row into the
+# profile roster. Applied as a profile bundle layer (the `dsh.bundle.patch`
+# manifest field); activate with `dsh plugin --profile <name> add dsh-cad-scene`
+# (also accepts `github:<user>/<repo>` and `link:<path>` specs).
+#
+# The row is a bare plugin by package name: the node half (exports ".") runs
+# in the host process (parse_cad_to_scene tool + the DWG parse route), and the
+# `dsh.client` declaration in package.json makes the browser half
+# (exports "./client") load in the web GUI (sidebar row + dual-pane panel +
+# the parse_cad_to_scene tool card).
+- insert:
+    - id: ui-cad-scene
+      name: 'dsh-cad-scene'
