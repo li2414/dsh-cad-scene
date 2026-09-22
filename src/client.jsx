@@ -343,6 +343,66 @@ const styles = {
   dot: (color) => ({ width: 8, height: 8, borderRadius: 4, background: color }),
 }
 
+// ── import portal styles (keyframes; injected once per page) ────────────────
+
+const IMPORT_CSS = `
+.cad-im-portal{position:relative;border:1.5px dashed rgba(56,189,248,.45);border-radius:16px;padding:30px 16px 24px;text-align:center;cursor:pointer;overflow:hidden;isolation:isolate;background:rgba(8,16,34,.55);transition:transform .25s ease,box-shadow .25s ease,border-color .25s ease}
+.cad-im-portal:hover{transform:translateY(-2px);border-color:rgba(56,189,248,.85);box-shadow:0 10px 30px rgba(56,189,248,.16),inset 0 0 24px rgba(56,189,248,.06)}
+.cad-im-portal[data-state='drag']{transform:translateY(-3px) scale(1.012);border-color:transparent;box-shadow:0 0 0 2px rgba(56,189,248,.65),0 14px 40px rgba(56,189,248,.3),inset 0 0 32px rgba(56,189,248,.12)}
+.cad-im-portal[data-state='parsing']{border-color:rgba(125,211,252,.8)}
+.cad-im-portal[data-state='done']{border-color:rgba(52,211,153,.7)}
+.cad-im-portal[data-state='error']{border-color:rgba(248,113,113,.8);animation:cad-im-shake .4s ease}
+.cad-im-grid{position:absolute;left:-40%;right:-40%;top:-30%;bottom:-30%;z-index:-2;background-image:linear-gradient(rgba(96,165,250,.16) 1px,transparent 1px),linear-gradient(90deg,rgba(96,165,250,.16) 1px,transparent 1px);background-size:24px 24px;transform:perspective(420px) rotateX(56deg);transform-origin:center 88%;opacity:.45;animation:cad-im-pan 7s linear infinite;transition:opacity .3s}
+.cad-im-portal[data-state='drag'] .cad-im-grid,.cad-im-portal[data-state='parsing'] .cad-im-grid{opacity:.85}
+@keyframes cad-im-pan{to{background-position:0 48px}}
+.cad-im-corner{position:absolute;width:18px;height:18px;border:2px solid rgba(56,189,248,.85);transition:all .25s ease;animation:cad-im-blink 3.4s ease-in-out infinite}
+.cad-im-corner.tl{top:8px;left:8px;border-right:none;border-bottom:none;border-radius:6px 0 0 0}
+.cad-im-corner.tr{top:8px;right:8px;border-left:none;border-bottom:none;border-radius:0 6px 0 0;animation-delay:.4s}
+.cad-im-corner.bl{bottom:8px;left:8px;border-right:none;border-top:none;border-radius:0 0 0 6px;animation-delay:.8s}
+.cad-im-corner.br{bottom:8px;right:8px;border-left:none;border-top:none;border-radius:0 0 6px 0;animation-delay:1.2s}
+.cad-im-portal[data-state='drag'] .cad-im-corner{width:28px;height:28px;border-color:#7dd3fc;box-shadow:0 0 8px rgba(56,189,248,.8)}
+@keyframes cad-im-blink{0%,100%{opacity:.35}50%{opacity:1}}
+.cad-im-stage{position:relative;height:84px;margin-bottom:10px}
+.cad-im-icon{width:72px;height:72px;animation:cad-im-float 3.2s ease-in-out infinite;transition:transform .25s;filter:drop-shadow(0 6px 14px rgba(56,189,248,.35))}
+.cad-im-portal[data-state='drag'] .cad-im-icon{transform:scale(1.14);animation-duration:1s}
+@keyframes cad-im-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+.cad-im-check{position:absolute;right:calc(50% - 64px);bottom:2px;width:34px;height:34px}
+.cad-im-check circle{fill:rgba(16,185,129,.2);stroke:#34d399;stroke-width:2.5}
+.cad-im-check path{stroke:#34d399;stroke-width:3.5;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:34;stroke-dashoffset:34;animation:cad-im-draw .5s .15s ease forwards}
+@keyframes cad-im-draw{to{stroke-dashoffset:0}}
+.cad-im-scan{position:absolute;left:6px;right:6px;height:34px;top:-40px;opacity:0;pointer-events:none;background:linear-gradient(180deg,transparent,rgba(56,189,248,.28) 35%,rgba(125,211,252,.95) 50%,rgba(56,189,248,.28) 65%,transparent);border-radius:8px}
+.cad-im-portal[data-state='drag'] .cad-im-scan,.cad-im-portal[data-state='parsing'] .cad-im-scan{opacity:1;animation:cad-im-scan 1.15s linear infinite}
+@keyframes cad-im-scan{0%{top:-40px}100%{top:100%}}
+.cad-im-cross{position:absolute;width:10px;height:10px;pointer-events:none;animation:cad-im-twinkle 2.8s ease-in-out infinite}
+.cad-im-cross::before,.cad-im-cross::after{content:'';position:absolute;background:rgba(125,211,252,.8)}
+.cad-im-cross::before{left:4px;top:0;width:2px;height:10px}
+.cad-im-cross::after{top:4px;left:0;height:2px;width:10px}
+@keyframes cad-im-twinkle{0%,100%{opacity:.12;transform:scale(.8)}50%{opacity:.9;transform:scale(1.1)}}
+.cad-im-title{font-size:14px;font-weight:600;letter-spacing:.02em}
+.cad-im-sub{font-size:12px;opacity:.75;margin-top:4px;transition:color .2s}
+.cad-im-portal[data-state='drag'] .cad-im-sub{color:#7dd3fc;opacity:1;animation:cad-im-pulse 1s ease-in-out infinite}
+@keyframes cad-im-pulse{50%{opacity:.45}}
+.cad-im-chip{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:3px 12px;border-radius:999px;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.35);font-family:ui-monospace,Consolas,monospace;font-size:12px;animation:cad-im-rise .3s ease}
+@keyframes cad-im-rise{from{opacity:0;transform:translateY(6px)}}
+.cad-im-btn{position:relative;overflow:hidden;padding:8px 26px;border:none;border-radius:10px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#2563eb,#06b6d4);box-shadow:0 6px 18px rgba(37,99,235,.35);transition:transform .2s,box-shadow .2s,opacity .2s}
+.cad-im-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 10px 24px rgba(37,99,235,.45)}
+.cad-im-btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.cad-im-btn::after{content:'';position:absolute;top:0;bottom:0;width:48px;left:-70px;background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);transform:skewX(-18deg)}
+.cad-im-btn:hover:not(:disabled)::after{animation:cad-im-shine .8s ease}
+.cad-im-btn[data-busy='true']::after{animation:cad-im-shine 1s linear infinite}
+@keyframes cad-im-shine{to{left:120%}}
+@keyframes cad-im-shake{20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
+`
+
+function ensureImportStyles() {
+  if (typeof document === 'undefined') return
+  if (document.getElementById('dsh-cad-scene-import-styles')) return
+  const style = document.createElement('style')
+  style.id = 'dsh-cad-scene-import-styles'
+  style.textContent = IMPORT_CSS
+  document.head.appendChild(style)
+}
+
 function hex(color) {
   return '#' + (color >>> 0).toString(16).padStart(6, '0')
 }
@@ -427,6 +487,9 @@ function CadSceneBuilderPanel() {
   const [scene, setScene] = useState(null)
   const [busy, setBusy] = useState(false)
   const [selection, setSelection] = useState(null)
+  const [dragging, setDragging] = useState(false)
+
+  useEffect(() => { ensureImportStyles() }, [])
 
   const acceptFile = (file) => {
     if (!file) return
@@ -452,6 +515,13 @@ function CadSceneBuilderPanel() {
     }
   }
 
+  const portalState = dragging ? 'drag'
+    : busy ? 'parsing'
+    : !fileState ? 'idle'
+    : fileState.status === 'done' ? 'done'
+    : fileState.status === 'error' ? 'error'
+    : 'ready'
+
   const statusText = !fileState ? '尚未选择文件'
     : fileState.status === 'ready' ? '待解析'
     : fileState.status === 'parsing' ? '解析中…'
@@ -463,17 +533,46 @@ function CadSceneBuilderPanel() {
       <div style={styles.col}>
         <h3 style={styles.title}>CAD 文件导入区</h3>
         <div
-          style={styles.drop}
+          className="cad-im-portal"
+          data-state={portalState}
           onClick={() => { if (inputRef.current) inputRef.current.click() }}
+          onDragEnter={(e) => { e.preventDefault(); setDragging(true) }}
           onDragOver={(e) => e.preventDefault()}
+          onDragLeave={(e) => { e.preventDefault(); setDragging(false) }}
           onDrop={(e) => {
             e.preventDefault()
+            setDragging(false)
             acceptFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0])
           }}
         >
-          <div style={{ fontSize: 28 }}>📐</div>
-          <div>点击选择或拖拽 CAD 文件到此处</div>
-          <div style={styles.hint}>支持 .dwg / .dxf / .step（.dxf 浏览器内直接解析；.dwg 经 Host 转换；.step 暂不支持）</div>
+          <div className="cad-im-grid" />
+          <span className="cad-im-corner tl" /><span className="cad-im-corner tr" />
+          <span className="cad-im-corner bl" /><span className="cad-im-corner br" />
+          <div className="cad-im-scan" />
+          <span className="cad-im-cross" style={{ top: 18, left: 30, animationDelay: '0.2s' }} />
+          <span className="cad-im-cross" style={{ top: 26, right: 36, animationDelay: '0.9s' }} />
+          <span className="cad-im-cross" style={{ bottom: 22, left: 44, animationDelay: '1.6s' }} />
+          <div className="cad-im-stage">
+            <svg className="cad-im-icon" viewBox="0 0 64 64" aria-hidden="true">
+              <path d="M14 6h26l10 10v42H14z" fill="rgba(30,58,138,.55)" stroke="#38bdf8" strokeWidth="2" strokeLinejoin="round" />
+              <path d="M40 6v10h10" fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinejoin="round" />
+              <circle cx="31" cy="36" r="8.5" fill="none" stroke="#7dd3fc" strokeWidth="2" />
+              <path d="M31 22.5v6M31 43.5v6M17.5 36h6M38.5 36h6" stroke="#7dd3fc" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            {fileState && fileState.status === 'done' ? (
+              <svg className="cad-im-check" viewBox="0 0 48 48">
+                <circle cx="24" cy="24" r="21" />
+                <path d="M13 25l7.5 7.5L35 16" />
+              </svg>
+            ) : null}
+          </div>
+          <div className="cad-im-title">{dragging ? '松手，开始解析图纸' : '拖拽 CAD 图纸到此处'}</div>
+          <div className="cad-im-sub">
+            {dragging ? '支持 .dwg / .dxf / .step' : '或点击选择文件 · 解析后实体叠加到右侧 3D 场景'}
+          </div>
+          {fileState ? (
+            <div className="cad-im-chip">{fileState.name} · {(fileState.size / 1024).toFixed(1)} KB</div>
+          ) : null}
           <input
             ref={inputRef}
             type="file"
@@ -493,7 +592,8 @@ function CadSceneBuilderPanel() {
         <div>
           <button
             type="button"
-            style={Object.assign({}, styles.btn, (!fileState || busy) ? { opacity: 0.5, cursor: 'not-allowed' } : {})}
+            className="cad-im-btn"
+            data-busy={busy ? 'true' : 'false'}
             disabled={!fileState || busy}
             onClick={runParse}
           >
