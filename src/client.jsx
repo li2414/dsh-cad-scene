@@ -26,6 +26,7 @@ const inject = ['slots']
 const CATEGORY_COLORS = { racks: 0xf97316, aisles: 0x94a3b8, zones: 0x22c55e, agvs: 0xef4444 }
 const CATEGORY_LABELS = { racks: '货架', aisles: '通道', zones: '区域', agvs: 'AGV' }
 const RACK_HEIGHT = 6
+const EMPTY_SCENE = { racks: [], aisles: [], zones: [], agvs: [], entities: [], layers: [] }
 
 // ── three.js builders (DXF plan (x, y) maps to ground (x, 0, -y)) ───────────
 
@@ -144,10 +145,8 @@ function SceneCanvas({ scene, selectedId, onSelect }) {
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
 
-    scene3.add(new THREE.AmbientLight(0xffffff, 0.75))
-    const sun = new THREE.DirectionalLight(0xffffff, 1.1)
-    sun.position.set(1, 2, 1)
-    scene3.add(sun)
+    scene3.add(new THREE.AmbientLight(0xffffff, 0.55))
+    scene3.add(new THREE.HemisphereLight(0xbfd4ff, 0x0b1220, 0.5))
 
     const group = new THREE.Group()
     const pickables = []
@@ -166,19 +165,59 @@ function SceneCanvas({ scene, selectedId, onSelect }) {
     scene3.add(group)
     pickablesRef.current = pickables
 
+    // Default environment — ground plane + grid + a visible sun — sized to the
+    // content (or a small playground before anything is parsed), so the scene
+    // always has a horizon to orbit against.
     const bounds = new THREE.Box3().setFromObject(group)
-    if (!bounds.isEmpty()) {
-      const center = bounds.getCenter(new THREE.Vector3())
-      const size = bounds.getSize(new THREE.Vector3())
-      const radius = Math.max(size.x, size.z, 10)
-      const grid = new THREE.GridHelper(radius * 2, 20, 0x334155, 0x1e293b)
-      grid.position.set(center.x, 0, center.z)
-      scene3.add(grid)
-      camera.position.set(center.x + radius * 0.9, radius * 0.9, center.z + radius * 0.9)
-      controls.target.copy(center)
-    } else {
-      camera.position.set(30, 30, 30)
-    }
+    const empty = bounds.isEmpty()
+    const center = empty ? new THREE.Vector3(0, 0, 0) : bounds.getCenter(new THREE.Vector3())
+    const size = empty ? new THREE.Vector3(40, 0, 40) : bounds.getSize(new THREE.Vector3())
+    const radius = Math.max(size.x, size.z, 40)
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 3, radius * 3),
+      new THREE.MeshStandardMaterial({ color: 0x141c2b, roughness: 1 }),
+    )
+    ground.rotation.x = -Math.PI / 2
+    ground.position.set(center.x, -0.02, center.z)
+    scene3.add(ground)
+
+    const grid = new THREE.GridHelper(radius * 3, 30, 0x334155, 0x1e293b)
+    grid.position.set(center.x, 0, center.z)
+    scene3.add(grid)
+
+    // Visible sun: glowing orb in the sky; the key light comes from its place.
+    const sunPos = new THREE.Vector3(center.x + radius * 0.8, radius * 1.5, center.z - radius * 0.6)
+    const sunOrb = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(radius * 0.06, 1.5), 24, 24),
+      new THREE.MeshBasicMaterial({ color: 0xffe6a3 }),
+    )
+    sunOrb.position.copy(sunPos)
+    scene3.add(sunOrb)
+
+    const glowCanvas = document.createElement('canvas')
+    glowCanvas.width = 64
+    glowCanvas.height = 64
+    const g2d = glowCanvas.getContext('2d')
+    const gradient = g2d.createRadialGradient(32, 32, 4, 32, 32, 32)
+    gradient.addColorStop(0, 'rgba(255,236,179,0.95)')
+    gradient.addColorStop(0.4, 'rgba(255,220,150,0.35)')
+    gradient.addColorStop(1, 'rgba(255,220,150,0)')
+    g2d.fillStyle = gradient
+    g2d.fillRect(0, 0, 64, 64)
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(glowCanvas), transparent: true, depthWrite: false }))
+    glow.scale.setScalar(Math.max(radius * 0.5, 8))
+    glow.position.copy(sunPos)
+    scene3.add(glow)
+
+    const keyLight = new THREE.DirectionalLight(0xfff2d8, 1.2)
+    keyLight.position.copy(sunPos)
+    keyLight.target.position.copy(center)
+    scene3.add(keyLight)
+    scene3.add(keyLight.target)
+
+    camera.position.set(center.x + radius * 0.9, radius * 0.9, center.z + radius * 0.9)
+    controls.target.copy(center)
     controls.update()
 
     const raycaster = new THREE.Raycaster()
@@ -224,8 +263,11 @@ function SceneCanvas({ scene, selectedId, onSelect }) {
       scene3.traverse((object) => {
         if (object.geometry) object.geometry.dispose()
         if (object.material) {
-          if (Array.isArray(object.material)) object.material.forEach((m) => m.dispose())
-          else object.material.dispose()
+          const mats = Array.isArray(object.material) ? object.material : [object.material]
+          for (const m of mats) {
+            if (m.map) m.map.dispose()
+            m.dispose()
+          }
         }
       })
       renderer.dispose()
@@ -472,10 +514,15 @@ function CadSceneBuilderPanel() {
       </div>
       <div style={styles.col}>
         <h3 style={styles.title}>Three.js 3D 场景显示区</h3>
-        {scene
-          ? <SceneCanvas scene={scene} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
-          : <div style={Object.assign({}, styles.drop, { cursor: 'default', flex: 1 })}>解析后在此显示 3D 场景（左键旋转、滚轮缩放、右键平移，点击实体查看详情）</div>}
-        {scene ? <InfoPanel scene={scene} selection={selection} /> : null}
+        <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+          <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
+          {!scene ? (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
+              解析后实体将叠加到场景中（左键旋转、滚轮缩放、右键平移，点击实体查看详情）
+            </div>
+          ) : null}
+        </div>
+        <InfoPanel scene={scene || EMPTY_SCENE} selection={selection} />
       </div>
     </div>
   )

@@ -43,7 +43,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_USERNAME/dsh-cad-scene.git"
+    "url": "git+https://github.com/li2414/dsh-cad-scene.git"
   },
   "dependencies": {
     "dxf-parser": "^1.1.2"
