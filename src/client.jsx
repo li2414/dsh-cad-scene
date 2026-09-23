@@ -242,11 +242,15 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       const scl = new THREE.Vector3()
       const pos3 = new THREE.Vector3()
       list.forEach((d, i) => {
-        const w = Math.max((d.size.width || 1) * (d.scale.x || 1), hs * 0.2)
-        const dep = Math.max((d.size.depth || 1) * (d.scale.y || 1), hs * 0.2)
+        const bb = d.bounding_box
+        const bw = bb ? Math.max(bb.max[0] - bb.min[0], 0.1) : 1
+        const bd = bb ? Math.max(bb.max[1] - bb.min[1], 0.1) : 1
+        const w = Math.max(bw * (d.scale.x || 1), hs * 0.2)
+        const dep = Math.max(bd * (d.scale.y || 1), hs * 0.2)
         const hgt = layerHeight(d.layer) * hs
         quat.setFromAxisAngle(yAxis, -((d.rotation || 0) * Math.PI) / 180)
-        pos3.set(d.position.x, hgt / 2, -d.position.y)
+        const ctr = d.center || [0, 0, 0]
+        pos3.set(ctr[0], hgt / 2, -ctr[1])
         scl.set(w, hgt, dep)
         m4.compose(pos3, quat, scl)
         mesh.setMatrixAt(i, m4)
@@ -760,7 +764,9 @@ function InfoPanel({ scene, selection }) {
           <div><span style={styles.label}>设备</span><strong>{dev.name || dev.id}</strong>{dev.name ? ' · ' + dev.id : ''}</div>
           <div><span style={styles.label}>类型</span>{dev.type}{dev.blockName ? ' · 块 ' + dev.blockName : ''}</div>
           <div><span style={styles.label}>图层</span>{dev.layer}</div>
-          <div><span style={styles.label}>尺寸</span>{Math.round(dev.size.width * 10) / 10} × {Math.round(dev.size.depth * 10) / 10}</div>
+          {dev.bounding_box ? (
+            <div><span style={styles.label}>尺寸</span>{Math.round((dev.bounding_box.max[0] - dev.bounding_box.min[0]) * 10) / 10} × {Math.round((dev.bounding_box.max[1] - dev.bounding_box.min[1]) * 10) / 10}</div>
+          ) : null}
           <div><span style={styles.label}>图元</span>{dev.entityCount} 个</div>
         </div>
       ) : null}
