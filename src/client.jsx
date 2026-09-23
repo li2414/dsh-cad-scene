@@ -428,6 +428,10 @@ const IMPORT_CSS = `
 .cad-p-logline{display:flex;gap:6px;padding:2px 0;line-height:1.5}
 .cad-p-warn{color:#fbbf24}
 .cad-p-err{color:#f87171}
+.cad-v-toggle{display:flex;padding:3px;border-radius:10px;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.22);gap:2px;flex:none}
+.cad-v-btn{padding:4px 14px;border:none;border-radius:8px;background:transparent;color:inherit;font-size:12px;cursor:pointer;transition:all .2s}
+.cad-v-btn[data-on='true']{background:linear-gradient(135deg,#2563eb,#06b6d4);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.4);font-weight:600}
+.cad-v-btn:hover:not([data-on='true']){background:rgba(148,163,184,.15)}
 `
 
 function ensureImportStyles() {
@@ -647,6 +651,286 @@ function ParseLog({ scene }) {
   )
 }
 
+// ── 2D CAD drawing canvas ───────────────────────────────────────────────────
+
+function makePrim(item, category, color) {
+  const t = item.type
+  if (t === 'LINE' || t === 'LWPOLYLINE' || t === 'POLYLINE') {
+    const pts = (item.vertices || []).filter((v) => v && typeof v.x === 'number')
+    if (pts.length < 2) return null
+    return { item, category, color, kind: 'poly', pts: item.closed && pts.length > 2 ? pts.concat([pts[0]]) : pts }
+  }
+  if (t === 'CIRCLE' && item.center) {
+    return { item, category, color, kind: 'circle', c: item.center, r: item.radius || 1 }
+  }
+  if (t === 'ARC' && item.center) {
+    return { item, category, color, kind: 'arc', c: item.center, r: item.radius || 1, a0: item.startAngle || 0, a1: item.endAngle != null ? item.endAngle : Math.PI }
+  }
+  if (item.position) {
+    return { item, category, color, kind: 'mark', p: item.position }
+  }
+  return null
+}
+
+function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) {
+  const hostRef = useRef(null)
+  const primsRef = useRef([])
+  const textsRef = useRef([])
+  const viewRef = useRef({ s: 1, tx: 0, ty: 0 })
+  const fittedRef = useRef(null)
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return undefined
+    const canvas = document.createElement('canvas')
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+    canvas.style.display = 'block'
+    canvas.style.background = '#0b1220'
+    canvas.style.cursor = 'crosshair'
+    canvas.style.touchAction = 'none'
+    host.appendChild(canvas)
+    const ctx2d = canvas.getContext('2d')
+
+    // build filtered primitives (same legend/layer filters as the 3D view)
+    const cats = hiddenCats || {}
+    const layersOff = hiddenLayers || {}
+    const colorOf = {}
+    for (const l of scene.layers || []) colorOf[l.name] = l.color > 0 ? hex(l.color) : '#94a3b8'
+    const prims = []
+    const texts = []
+    for (const category of ['racks', 'aisles', 'zones', 'agvs']) {
+      if (cats[category]) continue
+      for (const item of scene[category] || []) {
+        if (layersOff[item.layer]) continue
+        const prim = makePrim(item, category, colorOf[item.layer] || hex(CATEGORY_COLORS[category]))
+        if (prim) prims.push(prim)
+      }
+    }
+    let textIndex = 0
+    for (const e of scene.entities || []) {
+      if ((e.type === 'TEXT' || e.type === 'MTEXT') && !layersOff[e.layer] && e.text) {
+        textIndex += 1
+        texts.push({
+          item: Object.assign({ id: 'text-' + textIndex }, e),
+          category: null,
+          p: e.position || { x: 0, y: 0 },
+          text: e.text,
+          color: colorOf[e.layer] || '#94a3b8',
+        })
+      }
+    }
+    primsRef.current = prims
+    textsRef.current = texts
+
+    const view = viewRef.current
+    const dpr = window.devicePixelRatio || 1
+
+    const fit = () => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      const eat = (p) => {
+        if (!p) return
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+        maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+      }
+      for (const prim of prims) {
+        if (prim.kind === 'poly') prim.pts.forEach(eat)
+        else if (prim.kind === 'circle' || prim.kind === 'arc') {
+          eat({ x: prim.c.x - prim.r, y: prim.c.y - prim.r })
+          eat({ x: prim.c.x + prim.r, y: prim.c.y + prim.r })
+        } else eat(prim.p)
+      }
+      for (const t of texts) eat(t.p)
+      if (minX === Infinity) { minX = -20; minY = -20; maxX = 20; maxY = 20 }
+      const w = canvas.clientWidth || 600
+      const h = canvas.clientHeight || 360
+      const pad = 36
+      const s = Math.min((w - pad * 2) / Math.max(maxX - minX, 1), (h - pad * 2) / Math.max(maxY - minY, 1))
+      view.s = s > 0 ? s : 1
+      view.tx = w / 2 - ((minX + maxX) / 2) * view.s
+      view.ty = h / 2 + ((minY + maxY) / 2) * view.s
+    }
+
+    const draw = () => {
+      const w = canvas.clientWidth || 600
+      const h = canvas.clientHeight || 360
+      const s = view.s
+      const mx = (x) => x * s + view.tx
+      const my = (y) => view.ty - y * s
+      ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx2d.clearRect(0, 0, w, h)
+
+      // world-aligned faint grid + origin axes (UCS vibe)
+      let step = 10
+      while (step * s < 26) step *= 5
+      while (step * s > 130) step /= 5
+      ctx2d.lineWidth = 1
+      ctx2d.strokeStyle = 'rgba(148,163,184,0.08)'
+      const wx0 = Math.floor((0 - view.tx) / s / step) * step
+      const wx1 = Math.ceil((w - view.tx) / s / step) * step
+      const wy0 = Math.floor((view.ty - h) / s / step) * step
+      const wy1 = Math.ceil(view.ty / s / step) * step
+      ctx2d.beginPath()
+      for (let x = wx0; x <= wx1; x += step) { ctx2d.moveTo(mx(x), 0); ctx2d.lineTo(mx(x), h) }
+      for (let y = wy0; y <= wy1; y += step) { ctx2d.moveTo(0, my(y)); ctx2d.lineTo(w, my(y)) }
+      ctx2d.stroke()
+      ctx2d.strokeStyle = 'rgba(248,113,113,0.45)'
+      ctx2d.beginPath(); ctx2d.moveTo(0, my(0)); ctx2d.lineTo(w, my(0)); ctx2d.stroke()
+      ctx2d.strokeStyle = 'rgba(52,211,153,0.45)'
+      ctx2d.beginPath(); ctx2d.moveTo(mx(0), 0); ctx2d.lineTo(mx(0), h); ctx2d.stroke()
+
+      // geometry in layer colors; selection glows yellow
+      for (const prim of prims) {
+        const sel = selectedId != null && prim.item.id === selectedId
+        ctx2d.strokeStyle = sel ? '#facc15' : prim.color
+        ctx2d.fillStyle = ctx2d.strokeStyle
+        ctx2d.lineWidth = sel ? 2.6 : 1.4
+        if (sel) { ctx2d.shadowColor = 'rgba(250,204,21,0.8)'; ctx2d.shadowBlur = 8 } else { ctx2d.shadowBlur = 0 }
+        if (prim.kind === 'poly') {
+          ctx2d.beginPath()
+          prim.pts.forEach((p, i) => { if (i === 0) ctx2d.moveTo(mx(p.x), my(p.y)); else ctx2d.lineTo(mx(p.x), my(p.y)) })
+          ctx2d.stroke()
+        } else if (prim.kind === 'circle') {
+          ctx2d.beginPath()
+          ctx2d.arc(mx(prim.c.x), my(prim.c.y), Math.max(prim.r * s, 0.5), 0, Math.PI * 2)
+          ctx2d.stroke()
+        } else if (prim.kind === 'arc') {
+          ctx2d.beginPath()
+          ctx2d.arc(mx(prim.c.x), my(prim.c.y), Math.max(prim.r * s, 0.5), -prim.a1, -prim.a0, false)
+          ctx2d.stroke()
+        } else if (prim.kind === 'mark') {
+          const px = mx(prim.p.x); const py = my(prim.p.y)
+          const sz = 5
+          ctx2d.beginPath()
+          ctx2d.moveTo(px - sz, py); ctx2d.lineTo(px + sz, py)
+          ctx2d.moveTo(px, py - sz); ctx2d.lineTo(px, py + sz)
+          ctx2d.stroke()
+          ctx2d.beginPath()
+          ctx2d.arc(px, py, 2.2, 0, Math.PI * 2)
+          ctx2d.stroke()
+        }
+      }
+      ctx2d.shadowBlur = 0
+
+      // text annotations in layer colors
+      ctx2d.font = '12px ui-monospace, Consolas, monospace'
+      for (const t of texts) {
+        ctx2d.fillStyle = selectedId === t.item.id ? '#facc15' : t.color
+        ctx2d.fillText(String(t.text).slice(0, 48), mx(t.p.x), my(t.p.y))
+      }
+    }
+
+    const resize = () => {
+      const w = canvas.clientWidth || 600
+      const h = canvas.clientHeight || 360
+      canvas.width = Math.max(w * dpr, 1)
+      canvas.height = Math.max(h * dpr, 1)
+      if (fittedRef.current !== scene) { fit(); fittedRef.current = scene }
+      draw()
+    }
+    const resizeObserver = new ResizeObserver(resize)
+    resizeObserver.observe(host)
+    resize()
+
+    // pan / zoom / pick
+    const distSeg = (sx, sy, a, b) => {
+      const ax = mx(a.x), ay = my(a.y), bx = mx(b.x), by = my(b.y)
+      const dx = bx - ax, dy = by - ay
+      const len2 = dx * dx + dy * dy
+      const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((sx - ax) * dx + (sy - ay) * dy) / len2))
+      return Math.hypot(sx - (ax + t * dx), sy - (ay + t * dy))
+    }
+    const hitTest = (sx, sy) => {
+      const s = view.s
+      const tol = 6
+      for (let i = texts.length - 1; i >= 0; i--) {
+        const t = texts[i]
+        if (Math.abs(mx(t.p.x) - sx) < 44 && Math.abs(my(t.p.y) - sy) < 9) return { item: t.item, category: null }
+      }
+      for (let i = prims.length - 1; i >= 0; i--) {
+        const prim = prims[i]
+        let hit = false
+        if (prim.kind === 'poly') {
+          for (let j = 0; j + 1 < prim.pts.length; j++) {
+            if (distSeg(sx, sy, prim.pts[j], prim.pts[j + 1]) < tol) { hit = true; break }
+          }
+        } else if (prim.kind === 'circle') {
+          const d = Math.hypot(sx - mx(prim.c.x), sy - my(prim.c.y))
+          hit = Math.abs(d - prim.r * s) < tol || d < prim.r * s
+        } else if (prim.kind === 'arc') {
+          const dx = sx - mx(prim.c.x)
+          const dy = sy - my(prim.c.y)
+          const d = Math.hypot(dx, dy)
+          let a = Math.atan2(-dy, dx)
+          if (a < 0) a += Math.PI * 2
+          let a0 = prim.a0 % (Math.PI * 2); if (a0 < 0) a0 += Math.PI * 2
+          let a1 = prim.a1 % (Math.PI * 2); if (a1 < 0) a1 += Math.PI * 2
+          let sweep = a1 - a0; if (sweep <= 0) sweep += Math.PI * 2
+          let rel = a - a0; if (rel < 0) rel += Math.PI * 2
+          hit = Math.abs(d - prim.r * s) < tol && rel <= sweep
+        } else if (prim.kind === 'mark') {
+          hit = Math.hypot(sx - mx(prim.p.x), sy - my(prim.p.y)) < tol + 4
+        }
+        if (hit) return { item: prim.item, category: prim.category }
+      }
+      return null
+    }
+
+    let dragging = null
+    let moved = false
+    const onWheel = (e) => {
+      e.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      const sx = e.clientX - rect.left
+      const sy = e.clientY - rect.top
+      const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12
+      const next = Math.max(1e-4, view.s * factor)
+      view.tx = sx - (sx - view.tx) * (next / view.s)
+      view.ty = sy - (sy - view.ty) * (next / view.s)
+      view.s = next
+      draw()
+    }
+    const onMouseDown = (e) => {
+      dragging = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty }
+      moved = false
+    }
+    const onMouseMove = (e) => {
+      if (!dragging) return
+      const dx = e.clientX - dragging.x
+      const dy = e.clientY - dragging.y
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true
+      view.tx = dragging.tx + dx
+      view.ty = dragging.ty + dy
+      draw()
+    }
+    const onMouseUp = () => { dragging = null }
+    const onClick = (e) => {
+      if (moved) return
+      const rect = canvas.getBoundingClientRect()
+      onSelect(hitTest(e.clientX - rect.left, e.clientY - rect.top))
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('mousedown', onMouseDown)
+    canvas.addEventListener('mousemove', onMouseMove)
+    canvas.addEventListener('mouseup', onMouseUp)
+    canvas.addEventListener('mouseleave', onMouseUp)
+    canvas.addEventListener('click', onClick)
+
+    return () => {
+      resizeObserver.disconnect()
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('mousedown', onMouseDown)
+      canvas.removeEventListener('mousemove', onMouseMove)
+      canvas.removeEventListener('mouseup', onMouseUp)
+      canvas.removeEventListener('mouseleave', onMouseUp)
+      canvas.removeEventListener('click', onClick)
+      if (canvas.parentNode === host) host.removeChild(canvas)
+    }
+  }, [scene, hiddenCats, hiddenLayers, selectedId])
+
+  return <div ref={hostRef} style={{ flex: 1, minHeight: 320, borderRadius: 8, overflow: 'hidden', lineHeight: 0 }} />
+}
+
 function CadSceneBuilderPanel() {
   const [fileState, setFileState] = useState(null)
   const fileRef = useRef(null)
@@ -657,6 +941,7 @@ function CadSceneBuilderPanel() {
   const [dragging, setDragging] = useState(false)
   const [hiddenCats, setHiddenCats] = useState({})
   const [hiddenLayers, setHiddenLayers] = useState({})
+  const [view2d, setView2d] = useState(false)
 
   useEffect(() => { ensureImportStyles() }, [])
 
@@ -780,12 +1065,22 @@ function CadSceneBuilderPanel() {
         {scene ? <ParseLog scene={scene} /> : null}
       </div>
       <div style={styles.col}>
-        <h3 style={styles.title}>Three.js 3D 场景显示区</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <h3 style={Object.assign({}, styles.title, { flex: 1 })}>{view2d ? 'CAD 图纸 · 2D 俯视' : 'Three.js 3D 场景显示区'}</h3>
+          <div className="cad-v-toggle">
+            <button type="button" className="cad-v-btn" data-on={view2d ? 'false' : 'true'} onClick={() => setView2d(false)}>3D 场景</button>
+            <button type="button" className="cad-v-btn" data-on={view2d ? 'true' : 'false'} onClick={() => setView2d(true)}>CAD 图纸</button>
+          </div>
+        </div>
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
-          <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
+          {view2d ? (
+            <DrawingCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
+          ) : (
+            <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
+          )}
           {!scene ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
-              解析后实体将叠加到场景中（左键旋转、滚轮缩放、右键平移，点击实体查看详情）
+              {view2d ? '解析后在此查看 CAD 图纸（滚轮缩放、拖拽平移，点击图元查看详情）' : '解析后实体将叠加到场景中（左键旋转、滚轮缩放、右键平移，点击实体查看详情）'}
             </div>
           ) : null}
         </div>
