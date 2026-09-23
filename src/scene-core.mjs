@@ -136,9 +136,13 @@ function normalizeBlocks(parsed) {
     }))
 }
 
+const DEVICE_TYPE_LABELS = { racks: '货架', aisles: '通道', zones: '区域', agvs: 'AGV' }
+const NON_DEVICE_TYPES = new Set(['TEXT', 'MTEXT', 'DIMENSION', 'HATCH', 'ATTDEF', 'ATTRIB', 'LEADER', 'MLINE'])
+const NON_DEVICE_LAYER = /dim|标注|note|text|hatch|边框|图框|frame|border|title/i
+
 /**
  * Normalize one parsed entity into a portable geometry entry for device
- * children: { geometryType, coords, handle }. coords are flat numeric arrays
+ * geometry groups: { type, coords, handle }. coords are flat numeric arrays
  * (line [x1,y1,x2,y2], polyline [x1,y1,...], arc [cx,cy,r,a0,a1],
  * circle [cx,cy,r], point/text/insert [x,y]).
  */
@@ -147,43 +151,43 @@ function geometryEntry(e) {
   switch (e.type) {
     case 'LINE': {
       const v = e.vertices || []
-      if (v.length >= 2) return { geometryType: 'line', coords: [v[0].x, v[0].y, v[1].x, v[1].y], handle }
+      if (v.length >= 2) return { type: 'line', coords: [v[0].x, v[0].y, v[1].x, v[1].y], handle }
       break
     }
     case 'LWPOLYLINE':
     case 'POLYLINE': {
       const flat = []
       for (const v of e.vertices || []) flat.push(v.x, v.y)
-      if (flat.length >= 4) return { geometryType: 'polyline', coords: flat, closed: e.closed === true, handle }
+      if (flat.length >= 4) return { type: 'polyline', coords: flat, closed: e.closed === true, handle }
       break
     }
     case 'ARC':
-      return { geometryType: 'arc', coords: [e.center.x, e.center.y, e.radius || 0, e.startAngle || 0, e.endAngle || 0], handle }
+      return { type: 'arc', coords: [e.center.x, e.center.y, e.radius || 0, e.startAngle || 0, e.endAngle || 0], handle }
     case 'CIRCLE':
-      return { geometryType: 'circle', coords: [e.center.x, e.center.y, e.radius || 0], handle }
+      return { type: 'circle', coords: [e.center.x, e.center.y, e.radius || 0], handle }
     case 'TEXT':
     case 'MTEXT':
-      return { geometryType: 'text', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], text: e.text || '', handle }
+      return { type: 'text', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], text: e.text || '', handle }
     case 'INSERT':
-      return { geometryType: 'insert', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], blockName: e.block || null, rotation: e.rotation || 0, handle }
+      return { type: 'insert', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], blockName: e.block || null, rotation: e.rotation || 0, handle }
     case 'POINT':
-      return { geometryType: 'point', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], handle }
+      return { type: 'point', coords: [e.position ? e.position.x : 0, e.position ? e.position.y : 0], handle }
     default:
       break
   }
-  // never dropped: any other entity keeps at least a polyline/point entry
   const flat = []
   for (const v of e.vertices || []) flat.push(v.x, v.y)
-  if (flat.length >= 4) return { geometryType: 'polyline', coords: flat, closed: e.closed === true, handle }
+  if (flat.length >= 4) return { type: 'polyline', coords: flat, closed: e.closed === true, handle }
   const p = e.position || e.center || (e.vertices && e.vertices[0]) || { x: 0, y: 0 }
-  return { geometryType: 'point', coords: [p.x || 0, p.y || 0], handle }
+  return { type: 'point', coords: [p.x || 0, p.y || 0], handle }
 }
 
-function childrenBounds(children) {
+/** Plan bounding box of a geometry group (z kept flat at 0 for 2.5D plans). */
+function geometryGroupBounds(group) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const c of children) {
+  for (const c of group) {
     const co = c.coords || []
-    if (c.geometryType === 'arc' || c.geometryType === 'circle') {
+    if (c.type === 'arc' || c.type === 'circle') {
       const cx = co[0], cy = co[1], r = co[2] || 0
       minX = Math.min(minX, cx - r); maxX = Math.max(maxX, cx + r)
       minY = Math.min(minY, cy - r); maxY = Math.max(maxY, cy + r)
@@ -198,9 +202,10 @@ function childrenBounds(children) {
   return { minX, minY, maxX, maxY }
 }
 
-function makeDevice(id, layer, blockName, children, position, rotation, scale, texts) {
-  const bb = childrenBounds(children) || { minX: 0, minY: 0, maxX: 0, maxY: 0 }
-  const center = position || { x: (bb.minX + bb.maxX) / 2, y: (bb.minY + bb.maxY) / 2 }
+function makeDevice(id, layer, blockName, geometryGroup, position, rotation, scale, texts) {
+  const bb = geometryGroupBounds(geometryGroup) || { minX: 0, minY: 0, maxX: 0, maxY: 0 }
+  const cx = position ? position.x : (bb.minX + bb.maxX) / 2
+  const cy = position ? position.y : (bb.minY + bb.maxY) / 2
   let name = null
   let best = Infinity
   const reach = Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY, 1) + 5
@@ -215,75 +220,123 @@ function makeDevice(id, layer, blockName, children, position, rotation, scale, t
       name = String(t.text)
     }
   }
+  const family = classifyEntity({ layer: layer, block: blockName })
   return {
+    device_id: id,
     id,
-    type: String(layer || '0').toLowerCase(),
+    type: (family && DEVICE_TYPE_LABELS[family]) || layer || '0',
     layer: layer || '0',
     blockName: blockName || null,
     name: name ? name.replace(/[{}\\]/g, '').slice(0, 60) : null,
-    position: { x: center.x, y: center.y },
+    bounding_box: { min: [bb.minX, bb.minY, 0], max: [bb.maxX, bb.maxY, 0] },
+    center: [cx, cy, 0],
     rotation: rotation || 0,
     scale: scale || { x: 1, y: 1 },
-    size: { width: bb.maxX - bb.minX, depth: bb.maxY - bb.minY },
-    entityCount: children.length,
-    handles: children.map((c) => c.handle).filter((h) => h != null),
-    children,
+    entityCount: geometryGroup.length,
+    handles: geometryGroup.map((c) => c.handle).filter((h) => h != null),
+    geometry_group: geometryGroup,
   }
 }
 
 /**
- * Device decomposition per the layered contract:
- *  1. block level — every INSERT is one logical device (block geometry in
- *     `children` in block-local coords; position/rotation/scale preserved),
- *  2. layer level — a drawing without INSERTs groups each layer's entities
- *     into one logical device,
- *  3. isolated level — any entity not claimed by a grouping above is its own
- *     single-entity device (never dropped).
- * Texts attach as device names and always remain in entities[].
+ * Device decomposition: block-first, then spatial bbox clustering.
+ *  1. filter non-device content (TEXT/DIMENSION/HATCH/annotation layers),
+ *  2. block priority — every INSERT is one device; block content stays
+ *     together in block-local coordinates (never split),
+ *  3. remaining geometry clusters by bounding-box proximity: entities whose
+ *     boxes overlap/intersect or sit within the tolerance (10 drawing units
+ *     on mm-scale plans, proportional on smaller ones) join one device group
+ *     transitively (union-find).
  */
 export function buildDevices(entities, parsed) {
   const texts = entities.filter((e) => e.type === 'TEXT' || e.type === 'MTEXT')
   const blockDefs = (parsed && parsed.blocks) || {}
   const devices = []
   let n = 0
-  const nextId = () => {
-    n += 1
-    return 'device_' + n
+  const nextId = () => 'device_' + (++n)
+
+  const inserts = []
+  const loose = []
+  for (const e of entities) {
+    if (NON_DEVICE_TYPES.has(e.type)) continue
+    if (NON_DEVICE_LAYER.test(String(e.layer || ''))) continue
+    if (e.type === 'INSERT') inserts.push(e)
+    else loose.push(e)
   }
 
-  const inserts = entities.filter((e) => e.type === 'INSERT')
-  if (inserts.length > 0) {
-    for (const e of inserts) {
-      const def = blockDefs[e.block]
-      const blockEntities = ((def && def.entities) || []).map(normalizeEntity)
-      let children = blockEntities.map(geometryEntry).filter(Boolean)
-      if (children.length === 0) {
-        children = [{ geometryType: 'point', coords: [0, 0], handle: e.handle != null ? String(e.handle) : null }]
+  // 2. block priority: one INSERT is one logical device
+  for (const e of inserts) {
+    const def = blockDefs[e.block]
+    let group = ((def && def.entities) || []).map(normalizeEntity).map(geometryEntry).filter(Boolean)
+    if (group.length === 0) {
+      group = [{ type: 'point', coords: [0, 0], handle: e.handle != null ? String(e.handle) : null }]
+    }
+    devices.push(makeDevice(nextId(), e.layer, e.block || null, group,
+      e.position || { x: 0, y: 0 }, e.rotation || 0,
+      { x: e.xScale || 1, y: e.yScale || 1 }, texts))
+  }
+
+  // 3. spatial bounding-box clustering (union-find over near/overlapping boxes)
+  const parts = []
+  for (const e of loose) {
+    const entry = geometryEntry(e)
+    if (!entry) continue
+    const bb = geometryGroupBounds([entry])
+    if (!bb) continue
+    parts.push({ entry, layer: e.layer || '0', minX: bb.minX, minY: bb.minY, maxX: bb.maxX, maxY: bb.maxY })
+  }
+  if (parts.length > 0) {
+    let pminX = Infinity, pminY = Infinity, pmaxX = -Infinity, pmaxY = -Infinity
+    for (const p of parts) {
+      pminX = Math.min(pminX, p.minX); pminY = Math.min(pminY, p.minY)
+      pmaxX = Math.max(pmaxX, p.maxX); pmaxY = Math.max(pmaxY, p.maxY)
+    }
+    const planSpan = Math.max(pmaxX - pminX, pmaxY - pminY, 1)
+    // 10 drawing units on mm-scale plans (a rack detail gap); proportional
+    // on unit-less plans so clusters stay meaningful at any scale
+    const tol = planSpan > 5000 ? 10 : planSpan * 0.005
+    const parent = parts.map((_, i) => i)
+    const find = (i) => {
+      while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] }
+      return i
+    }
+    const union = (a, b) => {
+      const ra = find(a)
+      const rb = find(b)
+      if (ra !== rb) parent[rb] = ra
+    }
+    const cell = Math.max(tol * 5, planSpan / 100)
+    const grid = new Map()
+    parts.forEach((p, i) => {
+      const x0 = Math.floor((p.minX - tol) / cell)
+      const x1 = Math.floor((p.maxX + tol) / cell)
+      const y0 = Math.floor((p.minY - tol) / cell)
+      const y1 = Math.floor((p.maxY + tol) / cell)
+      for (let gx = x0; gx <= x1; gx++) {
+        for (let gy = y0; gy <= y1; gy++) {
+          const key = gx + ',' + gy
+          for (const j of grid.get(key) || []) {
+            const q = parts[j]
+            if (p.minX - tol <= q.maxX && q.minX - tol <= p.maxX && p.minY - tol <= q.maxY && q.minY - tol <= p.maxY) {
+              union(i, j)
+            }
+          }
+          if (!grid.has(key)) grid.set(key, [])
+          grid.get(key).push(i)
+        }
       }
-      devices.push(makeDevice(
-        nextId(), e.layer, e.block || null, children,
-        e.position || { x: 0, y: 0 }, e.rotation || 0,
-        { x: e.xScale || 1, y: e.yScale || 1 },
-        texts,
-      ))
-    }
-    for (const e of entities) {
-      if (e.type === 'INSERT' || e.type === 'TEXT' || e.type === 'MTEXT') continue
-      const child = geometryEntry(e)
-      if (!child) continue
-      devices.push(makeDevice(nextId(), e.layer, null, [child], null, 0, { x: 1, y: 1 }, texts))
-    }
-  } else {
-    const byLayer = new Map()
-    for (const e of entities) {
-      if (e.type === 'TEXT' || e.type === 'MTEXT') continue
-      const key = e.layer || '0'
-      if (!byLayer.has(key)) byLayer.set(key, [])
-      const child = geometryEntry(e)
-      if (child) byLayer.get(key).push(child)
-    }
-    for (const [layer, children] of byLayer) {
-      devices.push(makeDevice(nextId(), layer, null, children, null, 0, { x: 1, y: 1 }, texts))
+    })
+    const groups = new Map()
+    parts.forEach((p, i) => {
+      const r = find(i)
+      if (!groups.has(r)) groups.set(r, [])
+      groups.get(r).push(p)
+    })
+    for (const members of groups.values()) {
+      const layerCounts = {}
+      for (const m of members) layerCounts[m.layer] = (layerCounts[m.layer] || 0) + 1
+      const layer = Object.keys(layerCounts).sort((a, b) => layerCounts[b] - layerCounts[a])[0] || '0'
+      devices.push(makeDevice(nextId(), layer, null, members.map((m) => m.entry), null, 0, { x: 1, y: 1 }, texts))
     }
   }
   return devices

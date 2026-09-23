@@ -278,22 +278,22 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
         const startTri = triBase
         const base = new THREE.Color(selSet.has(d.id) ? 0xfacc15 : layerColor(scene, d.layer))
         const dark = base.clone().multiplyScalar(0.22)
-        for (const c of d.children || []) {
+        for (const c of d.geometry_group || []) {
           const co = c.coords || []
-          if (c.geometryType === 'line' && co.length >= 4) {
+          if (c.type === 'line' && co.length >= 4) {
             pushWall(pos, col, co[0], co[1], co[2], co[3], h, base, dark)
             triBase += 2
-          } else if (c.geometryType === 'polyline') {
+          } else if (c.type === 'polyline') {
             for (let i = 0; i + 3 < co.length; i += 2) {
               pushWall(pos, col, co[i], co[i + 1], co[i + 2], co[i + 3], h, base, dark)
               triBase += 2
             }
-          } else if (c.geometryType === 'arc' || c.geometryType === 'circle') {
+          } else if (c.type === 'arc' || c.type === 'circle') {
             const cx = co[0]
             const cy = co[1]
             const r = co[2] || 0
-            const s0 = c.geometryType === 'circle' ? 0 : (co[3] || 0)
-            const s1 = c.geometryType === 'circle' ? Math.PI * 2 : (co[4] || 0)
+            const s0 = c.type === 'circle' ? 0 : (co[3] || 0)
+            const s1 = c.type === 'circle' ? Math.PI * 2 : (co[4] || 0)
             let prevX = cx + r * Math.cos(s0)
             let prevY = cy + r * Math.sin(s0)
             for (let s = 1; s <= 24; s++) {
