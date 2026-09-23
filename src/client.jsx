@@ -259,6 +259,13 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       mesh.instanceMatrix.needsUpdate = true
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
       mesh.userData.instanceDevices = list
+      // incremental per-device highlight: recolor just the instance colors
+      mesh.userData.recolor = (sel) => {
+        list.forEach((d, i) => {
+          mesh.setColorAt(i, new THREE.Color(sel && sel.has(d.id) ? 0xfacc15 : layerColor(scene, d.layer)))
+        })
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+      }
       group.add(mesh)
       pickables.push(mesh)
     }
@@ -319,6 +326,28 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       geom.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
       const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
       mesh.userData.deviceRanges = ranges
+      // incremental per-device highlight: rewrite only the selected device's
+      // wall gradient in the merged buffer (6-vertex wall pattern below)
+      mesh.userData.recolor = (sel) => {
+        const attr = mesh.geometry.getAttribute('color')
+        const arr = attr.array
+        for (const r of ranges) {
+          const on = sel && sel.has(r.device.id)
+          const base = new THREE.Color(on ? 0xfacc15 : layerColor(scene, r.device.layer))
+          const dark = base.clone().multiplyScalar(0.22)
+          let o = r.start * 9
+          const walls = (r.end - r.start) / 2
+          for (let w = 0; w < walls; w++) {
+            arr[o++] = dark.r; arr[o++] = dark.g; arr[o++] = dark.b
+            arr[o++] = dark.r; arr[o++] = dark.g; arr[o++] = dark.b
+            arr[o++] = base.r; arr[o++] = base.g; arr[o++] = base.b
+            arr[o++] = dark.r; arr[o++] = dark.g; arr[o++] = dark.b
+            arr[o++] = base.r; arr[o++] = base.g; arr[o++] = base.b
+            arr[o++] = base.r; arr[o++] = base.g; arr[o++] = base.b
+          }
+        }
+        attr.needsUpdate = true
+      }
       group.add(mesh)
       pickables.push(mesh)
     }
@@ -463,14 +492,9 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
 
   useEffect(() => {
     for (const object of pickablesRef.current) {
-      object.traverse((child) => {
-        const material = child.material
-        if (material && 'emissive' in material) {
-          const it = child.userData.item
-          const isSel = selected && it && (selected.has(it.id) || (it.handle != null && selected.has(String(it.handle))))
-          material.emissive.setHex(isSel ? 0x666666 : 0x000000)
-        }
-      })
+      if (object.userData && typeof object.userData.recolor === 'function') {
+        object.userData.recolor(selected)
+      }
     }
   }, [selected])
 
