@@ -40,6 +40,23 @@ function layerPaletteColor(name) {
   return LAYER_PALETTE[h % LAYER_PALETTE.length]
 }
 
+// Semantic heights for 2.5D curtains (flat drawings carry no Z): guessing the
+// representative height of each layer's equipment family.
+const HEIGHT_RULES = [
+  [/crane|elevat|lift|hoist|stacker|货架|堆垛|提升/, 11],
+  [/platform|conveyor|belt|roller|输送|转台/, 1.5],
+  [/shuttle|vehicle|agv|amr|rgv|trolley|小车|叉车|穿梭/, 0.8],
+  [/rack|shelf|shelv|pallet|托盘/, 6],
+]
+
+function layerHeight(name) {
+  const l = String(name || '').toLowerCase()
+  for (const rule of HEIGHT_RULES) {
+    if (rule[0].test(l)) return rule[1]
+  }
+  return 1
+}
+
 // Layer identity wins: the drawing's own layer color, else a stable per-layer
 // palette color. Category colors are only a last resort.
 function layerColor(scene, layerName, fallback) {
@@ -159,6 +176,9 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 10000)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
+    // gentle auto-orbit to reveal the 2.5D depth; stops at first interaction
+    controls.autoRotate = true
+    controls.autoRotateSpeed = 0.8
 
     scene3.add(new THREE.AmbientLight(0xffffff, 0.55))
     scene3.add(new THREE.HemisphereLight(0xbfd4ff, 0x0b1220, 0.5))
@@ -172,7 +192,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const pushSeg = (cat, layer, a, b) => {
       const key = String(cat) + '|' + String(layer)
       if (!segGroups[key]) segGroups[key] = { cat, layer, pts: [] }
-      segGroups[key].pts.push(a.x, (a.z || 0) + 0.05, -a.y, b.x, (b.z || 0) + 0.05, -b.y)
+      segGroups[key].pts.push(a, b)
     }
     const chainSegs = (cat, layer, item) => {
       const pts = item.vertices || []
@@ -219,13 +239,35 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
       group.add(object)
       pickables.push(object)
     }
-    // mass line segments batched per category+layer (one draw call each)
+    // mass line segments render as 2.5D vertical curtain walls per
+    // category+layer (semantic height + dark-to-bright gradient) — flat
+    // drawings carry no Z, so depth comes from the equipment-family height.
     for (const key of Object.keys(segGroups)) {
       const g = segGroups[key]
+      const h = layerHeight(g.layer)
+      const base = new THREE.Color(layerColor(scene, g.layer, g.cat ? CATEGORY_COLORS[g.cat] : 0x94a3b8))
+      const dark = base.clone().multiplyScalar(0.22)
+      const pos = []
+      const col = []
+      for (let i = 0; i + 1 < g.pts.length; i += 2) {
+        const a = g.pts[i]
+        const b = g.pts[i + 1]
+        const y0a = (a.z || 0)
+        const y0b = (b.z || 0)
+        const a0 = [a.x, y0a, -a.y]
+        const b0 = [b.x, y0b, -b.y]
+        const a1 = [a.x, y0a + h, -a.y]
+        const b1 = [b.x, y0b + h, -b.y]
+        pos.push(...a0, ...b0, ...b1, ...a0, ...b1, ...a1)
+        col.push(
+          dark.r, dark.g, dark.b, dark.r, dark.g, dark.b, base.r, base.g, base.b,
+          dark.r, dark.g, dark.b, base.r, base.g, base.b, base.r, base.g, base.b,
+        )
+      }
       const geom = new THREE.BufferGeometry()
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(g.pts, 3))
-      const color = layerColor(scene, g.layer, g.cat ? CATEGORY_COLORS[g.cat] : 0x94a3b8)
-      group.add(new THREE.LineSegments(geom, new THREE.LineBasicMaterial({ color })))
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      geom.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
+      group.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })))
     }
     scene3.add(group)
     pickablesRef.current = pickables
@@ -238,6 +280,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const center = empty ? new THREE.Vector3(0, 0, 0) : bounds.getCenter(new THREE.Vector3())
     const size = empty ? new THREE.Vector3(40, 0, 40) : bounds.getSize(new THREE.Vector3())
     const radius = Math.max(size.x, size.z, size.y, 40)
+    scene3.fog = new THREE.Fog(0x0f172a, radius * 1.5, radius * 5)
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(radius * 3, radius * 3),
@@ -281,7 +324,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     scene3.add(keyLight)
     scene3.add(keyLight.target)
 
-    camera.position.set(center.x + radius * 0.9, radius * 0.9, center.z + radius * 0.9)
+    camera.position.set(center.x + radius * 1.0, radius * 0.55, center.z + radius * 1.0)
     controls.target.copy(center)
     controls.update()
 
@@ -301,6 +344,11 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
         onSelect(null)
       }
     }
+    const stopAuto = () => {
+      controls.autoRotate = false
+      renderer.domElement.removeEventListener('pointerdown', stopAuto)
+    }
+    renderer.domElement.addEventListener('pointerdown', stopAuto)
     renderer.domElement.addEventListener('click', onClick)
 
     const resizeObserver = new ResizeObserver(() => {
