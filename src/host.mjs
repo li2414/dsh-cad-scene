@@ -19,7 +19,7 @@
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, copyFileSync, createReadStream, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename, delimiter } from 'node:path'
 import { parseDxfToScene, summarizeScene } from './scene-core.mjs'
@@ -29,7 +29,23 @@ const execFileAsync = promisify(execFile)
 const name = 'dsh-cad-scene'
 const inject = ['tools', 'fs']
 const ROUTE_PATH = '/api/cad-scene-builder/parse'
+const CONVERTED_PATH = '/api/cad-scene-builder/converted/'
 const BODY_LIMIT = 64 * 1024 * 1024
+
+// Converted DXFs stay on disk in the temp dir and are served back through a
+// token URL so the panel can offer a download without shipping 100MB+ text
+// through the JSON response.
+const convertedStore = new Map()
+
+function rememberConverted(path, name) {
+  const token = Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36)
+  convertedStore.set(token, { path, name })
+  while (convertedStore.size > 8) {
+    const oldest = convertedStore.keys().next().value
+    convertedStore.delete(oldest)
+  }
+  return token
+}
 
 // ── DWG converter discovery (shared by the tool and the panel route) ────────
 
@@ -146,7 +162,9 @@ async function handleParse(req, res, cfg) {
       writeFileSync(inputPath, Buffer.from(content, 'base64'))
       const dxfPath = await convertDwgToDxf(inputPath, converter)
       const scene = parseDxfToScene(readFileSync(dxfPath, 'utf8'), fileName, 'dwg->dxf:' + converter.kind)
-      return writeJson(res, 200, { scene })
+      const outName = String(fileName).replace(/\.dwg$/i, '') + '.dxf'
+      const token = rememberConverted(dxfPath, outName)
+      return writeJson(res, 200, { scene, download: { url: CONVERTED_PATH + token, name: outName } })
     }
     // .dxf and anything else: treat as DXF text
     const scene = parseDxfToScene(Buffer.from(content, 'base64').toString('utf8'), fileName, 'dxf')
@@ -154,6 +172,23 @@ async function handleParse(req, res, cfg) {
   } catch (error) {
     return writeJson(res, 422, { error: error && error.message ? error.message : String(error) })
   }
+}
+
+/** Stream one converted DXF back to the browser (attachment download). */
+function handleConverted(req, res) {
+  if (!isLoopbackRequest(req)) return writeJson(res, 403, { error: 'forbidden' })
+  if (req.method !== 'GET') return writeJson(res, 405, { error: 'method-not-allowed' })
+  const token = String(req.url || '').slice(CONVERTED_PATH.length).split('?')[0]
+  const entry = convertedStore.get(token)
+  if (!entry) return writeJson(res, 404, { error: 'converted file not found or expired' })
+  if (!existsSync(entry.path)) return writeJson(res, 404, { error: 'converted file no longer exists on disk' })
+  const size = statSync(entry.path).size
+  res.writeHead(200, {
+    'content-type': 'application/dxf',
+    'content-disposition': 'attachment; filename="' + entry.name.replace(/["\\]/g, '_') + '"',
+    'content-length': String(size),
+  })
+  createReadStream(entry.path).pipe(res)
 }
 
 // ── parse_cad_to_scene tool (plain ToolDefinition, global registration) ─────
@@ -232,7 +267,14 @@ function apply(ctx, config) {
   // approach silently raced and left /api/cad-scene-builder/parse as a404.
   // Non-web profiles never see the service and keep the tool-only behavior.
   ctx.inject(['webServer'], (webCtx) => {
-    webCtx.effect(() => webCtx.webServer.register({ kind: 'exact', path: ROUTE_PATH, handler: (req, res) => handleParse(req, res, cfg) }), 'dsh-cad-scene: parse route')
+    webCtx.effect(() => {
+      const offParse = webCtx.webServer.register({ kind: 'exact', path: ROUTE_PATH, handler: (req, res) => handleParse(req, res, cfg) })
+      const offConverted = webCtx.webServer.register({ kind: 'prefix', path: CONVERTED_PATH, handler: handleConverted })
+      return () => {
+        offParse()
+        offConverted()
+      }
+    }, 'dsh-cad-scene: parse + converted routes')
   })
 }
 

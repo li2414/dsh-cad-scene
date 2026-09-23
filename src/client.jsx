@@ -486,10 +486,11 @@ async function parseFile(file, onPhase) {
     if (!response.ok || !payload || !payload.scene) {
       throw new Error((payload && payload.error) || ('解析服务错误 (HTTP ' + response.status + ')'))
     }
-    return payload.scene
+    return { scene: payload.scene, download: payload.download || null }
   }
   const text = await file.text()
-  return runWorkerParse(file.name, text, 'dxf', phase)
+  const scene = await runWorkerParse(file.name, text, 'dxf', phase)
+  return { scene, download: null }
 }
 
 // ── shared components ───────────────────────────────────────────────────────
@@ -608,6 +609,8 @@ const IMPORT_CSS = `
 .cad-p-edit input{flex:1;min-width:0;padding:3px 8px;border-radius:6px;border:1px solid rgba(56,189,248,.4);background:rgba(8,16,34,.6);color:inherit;font-size:11px}
 .cad-p-mini{flex:none;width:22px;height:22px;border-radius:6px;border:1px solid rgba(148,163,184,.3);background:transparent;color:inherit;cursor:pointer;font-size:11px;line-height:1;opacity:.7}
 .cad-p-mini:hover{opacity:1;border-color:rgba(56,189,248,.6)}
+.cad-im-dl{background:linear-gradient(135deg,#059669,#10b981);box-shadow:0 6px 18px rgba(16,185,129,.3);animation:cad-im-rise .3s ease}
+.cad-im-dl:hover:not(:disabled){box-shadow:0 10px 24px rgba(16,185,129,.45)}
 `
 
 function ensureImportStyles() {
@@ -1224,6 +1227,7 @@ function CadSceneBuilderPanel() {
   const [selection, setSelection] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [hiddenLayers, setHiddenLayers] = useState({})
+  const [dxfDownload, setDxfDownload] = useState(null)
   const [view2d, setView2d] = useState(false)
 
   useEffect(() => { ensureImportStyles() }, [])
@@ -1236,6 +1240,7 @@ function CadSceneBuilderPanel() {
     setScene(null)
     setSelection(null)
     setHiddenLayers({})
+    setDxfDownload(null)
     setFileState({ name: file.name, size: file.size, status: 'ready', error: null })
   }
 
@@ -1245,8 +1250,9 @@ function CadSceneBuilderPanel() {
     setBusy(true)
     setFileState((s) => Object.assign({}, s, { status: 'parsing', error: null }))
     try {
-      const result = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })))
-      setScene(result)
+      const res = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })))
+      setScene(res.scene)
+      setDxfDownload(res.download || null)
       setFileState((s) => Object.assign({}, s, { status: 'done' }))
     } catch (error) {
       setFileState((s) => Object.assign({}, s, { status: 'error', error: String(error && error.message || error) }))
@@ -1329,7 +1335,7 @@ function CadSceneBuilderPanel() {
             {fileState.error ? <div style={{ color: '#f87171' }}>{fileState.error}</div> : null}
           </div>
         ) : null}
-        <div>
+        <div style={{ display: 'flex', gap: 8 }}>
           <button
             type="button"
             className="cad-im-btn"
@@ -1339,6 +1345,20 @@ function CadSceneBuilderPanel() {
           >
             {busy ? '解析中…' : '解析'}
           </button>
+          {dxfDownload ? (
+            <button
+              type="button"
+              className="cad-im-btn cad-im-dl"
+              onClick={() => {
+                const a = document.createElement('a')
+                a.href = dxfDownload.url
+                a.download = dxfDownload.name
+                document.body.appendChild(a)
+                a.click()
+                a.remove()
+              }}
+            >⬇ 下载 DXF</button>
+          ) : null}
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
         {scene ? <StatsCard scene={scene} /> : null}
