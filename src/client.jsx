@@ -1551,6 +1551,25 @@ function CadSceneBuilderPanel() {
               }}
             >⬇ 下载 DXF</button>
           ) : null}
+          {scene ? (
+            <button
+              type="button"
+              className="cad-im-btn"
+              onClick={() => {
+                const blob = new Blob([JSON.stringify(scene, null, 2)], { type: 'application/json' })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = String((scene.meta && scene.meta.source) || 'scene').replace(/\.[^.]+$/, '') + '.scene.json'
+                document.body.appendChild(a)
+                a.click()
+                setTimeout(() => {
+                  a.remove()
+                  URL.revokeObjectURL(url)
+                }, 2000)
+              }}
+            >⬇ 下载 JSON</button>
+          ) : null}
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
         {scene ? <DeviceList scene={scene} selection={selection} onSelect={selectDevice} /> : null}
