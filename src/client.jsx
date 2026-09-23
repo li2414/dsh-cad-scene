@@ -83,19 +83,20 @@ function extrudePolygon(vertices, height, color) {
   return mesh
 }
 
-function flatPolygon(vertices, color) {
+function flatPolygon(vertices, color, hs) {
   const geometry = new THREE.ShapeGeometry(shapeFrom(vertices))
   geometry.rotateX(-Math.PI / 2)
   const mesh = new THREE.Mesh(
     geometry,
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.28, side: THREE.DoubleSide }),
   )
-  mesh.position.y = ((vertices[0] && vertices[0].z) || 0) + 0.05
+  mesh.position.y = ((vertices[0] && vertices[0].z) || 0) + 0.05 * (hs || 1)
   return mesh
 }
 
-function polylineObject(vertices, color, closed) {
-  const points = vertices.map((v) => new THREE.Vector3(v.x, (v.z || 0) + 0.12, -v.y))
+function polylineObject(vertices, color, closed, hs) {
+  const lift = 0.12 * (hs || 1)
+  const points = vertices.map((v) => new THREE.Vector3(v.x, (v.z || 0) + lift, -v.y))
   if (closed && points.length > 2) points.push(points[0].clone())
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
@@ -103,23 +104,25 @@ function polylineObject(vertices, color, closed) {
   )
 }
 
-function arcObject(center, radius, startAngle, endAngle, color) {
+function arcObject(center, radius, startAngle, endAngle, color, hs) {
   // y -> -z mirrors the plan, so the radian range is negated and swapped.
+  const lift = 0.12 * (hs || 1)
   const curve = new THREE.EllipseCurve(center.x, center.y, radius, radius, -endAngle, -startAngle, false)
-  const points = curve.getPoints(48).map((p) => new THREE.Vector3(p.x, (center.z || 0) + 0.12, -p.y))
+  const points = curve.getPoints(48).map((p) => new THREE.Vector3(p.x, (center.z || 0) + lift, -p.y))
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
     new THREE.LineBasicMaterial({ color }),
   )
 }
 
-function buildItemObject(item, category, scene) {
+function buildItemObject(item, category, scene, hs) {
   const color = layerColor(scene, item.layer, CATEGORY_COLORS[category] || 0x94a3b8)
   switch (item.type) {
     case 'INSERT': {
-      const w = category === 'agvs' ? 1.2 : 2.4
-      const hgt = category === 'agvs' ? 0.8 : RACK_HEIGHT
-      const d = category === 'agvs' ? 0.8 : 1.2
+      const s = hs || 1
+      const w = (category === 'agvs' ? 1.2 : 2.4) * s
+      const hgt = (category === 'agvs' ? 0.8 : RACK_HEIGHT) * s
+      const d = (category === 'agvs' ? 0.8 : 1.2) * s
       const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(w, hgt, d),
         new THREE.MeshStandardMaterial({ color }),
@@ -130,25 +133,25 @@ function buildItemObject(item, category, scene) {
     }
     case 'CIRCLE': {
       const c = item.center || { x: 0, y: 0 }
-      if (category === 'zones') return arcObject(c, item.radius || 1, 0, Math.PI * 2, color)
+      if (category === 'zones') return arcObject(c, item.radius || 1, 0, Math.PI * 2, color, hs)
       const mesh = new THREE.Mesh(
-        new THREE.CylinderGeometry(item.radius || 1, item.radius || 1, RACK_HEIGHT, 24),
+        new THREE.CylinderGeometry(item.radius || 1, item.radius || 1, RACK_HEIGHT * (hs || 1), 24),
         new THREE.MeshStandardMaterial({ color }),
       )
-      mesh.position.set(c.x, RACK_HEIGHT / 2 + (c.z || 0), -c.y)
+      mesh.position.set(c.x, RACK_HEIGHT * (hs || 1) / 2 + (c.z || 0), -c.y)
       return mesh
     }
     case 'LWPOLYLINE':
     case 'POLYLINE': {
       const vertices = Array.isArray(item.vertices) ? item.vertices : []
       if (vertices.length < 2) return null
-      if (category === 'zones') return item.closed ? flatPolygon(vertices, color) : polylineObject(vertices, color, false)
-      return item.closed ? extrudePolygon(vertices, RACK_HEIGHT, color) : polylineObject(vertices, color, false)
+      if (category === 'zones') return item.closed ? flatPolygon(vertices, color, hs) : polylineObject(vertices, color, false, hs)
+      return item.closed ? extrudePolygon(vertices, RACK_HEIGHT * (hs || 1), color) : polylineObject(vertices, color, false, hs)
     }
     case 'LINE':
-      return polylineObject(Array.isArray(item.vertices) ? item.vertices : [], color, false)
+      return polylineObject(Array.isArray(item.vertices) ? item.vertices : [], color, false, hs)
     case 'ARC':
-      return arcObject(item.center || { x: 0, y: 0 }, item.radius || 1, item.startAngle || 0, item.endAngle || Math.PI, color)
+      return arcObject(item.center || { x: 0, y: 0 }, item.radius || 1, item.startAngle || 0, item.endAngle || Math.PI, color, hs)
     default:
       return null
   }
@@ -185,6 +188,27 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
 
     const group = new THREE.Group()
     const pickables = []
+    // unit-agnostic scale: semantic heights are ratios of the plan span, so
+    // mm drawings (100k+ units) and unit-less plans both read as 2.5D depth
+    let pminX = Infinity, pminY = Infinity, pmaxX = -Infinity, pmaxY = -Infinity
+    const eatPlan = (p) => {
+      if (!p || typeof p.x !== 'number') return
+      pminX = Math.min(pminX, p.x); pminY = Math.min(pminY, p.y)
+      pmaxX = Math.max(pmaxX, p.x); pmaxY = Math.max(pmaxY, p.y)
+    }
+    for (const cat of ['racks', 'aisles', 'zones', 'agvs']) {
+      for (const item of scene[cat] || []) {
+        eatPlan(item.position); eatPlan(item.center)
+        for (const v of item.vertices || []) eatPlan(v)
+      }
+    }
+    for (const e of scene.entities || []) {
+      eatPlan(e.position); eatPlan(e.center)
+      for (const v of e.vertices || []) eatPlan(v)
+    }
+    const planRadius = pminX === Infinity ? 100 : Math.max(pmaxX - pminX, pmaxY - pminY, 40)
+    const hs = planRadius / 100
+
     const cats = hiddenCats || {}
     const layersOff = hiddenLayers || {}
     const segGroups = {}
@@ -208,7 +232,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
           chainSegs(category, item.layer, item)
           continue
         }
-        const object = buildItemObject(item, category, scene)
+        const object = buildItemObject(item, category, scene, hs)
         if (!object) continue
         object.traverse((child) => {
           child.userData.item = item
@@ -230,7 +254,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
         continue
       }
       const item = Object.assign({ id: 'ent-' + (++synth) }, e)
-      const object = buildItemObject(item, null, scene)
+      const object = buildItemObject(item, null, scene, hs)
       if (!object) continue
       object.traverse((child) => {
         child.userData.item = item
@@ -244,7 +268,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     // drawings carry no Z, so depth comes from the equipment-family height.
     for (const key of Object.keys(segGroups)) {
       const g = segGroups[key]
-      const h = layerHeight(g.layer)
+      const h = layerHeight(g.layer) * hs
       const base = new THREE.Color(layerColor(scene, g.layer, g.cat ? CATEGORY_COLORS[g.cat] : 0x94a3b8))
       const dark = base.clone().multiplyScalar(0.22)
       const pos = []
@@ -281,13 +305,18 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const size = empty ? new THREE.Vector3(40, 0, 40) : bounds.getSize(new THREE.Vector3())
     const radius = Math.max(size.x, size.z, size.y, 40)
     scene3.fog = new THREE.Fog(0x0f172a, radius * 1.5, radius * 5)
+    // adaptive clip planes: mm-scale drawings (400k+ units) sit far outside a
+    // fixed far plane and would render as a black screen
+    camera.near = Math.max(radius * 0.001, 0.01)
+    camera.far = Math.max(radius * 30, 1000)
+    camera.updateProjectionMatrix()
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(radius * 3, radius * 3),
       new THREE.MeshStandardMaterial({ color: 0x141c2b, roughness: 1 }),
     )
     ground.rotation.x = -Math.PI / 2
-    ground.position.set(center.x, -0.02, center.z)
+    ground.position.set(center.x, -0.02 * hs, center.z)
     scene3.add(ground)
 
     const grid = new THREE.GridHelper(radius * 3, 30, 0x334155, 0x1e293b)
