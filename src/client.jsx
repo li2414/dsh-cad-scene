@@ -209,89 +209,114 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
     const planRadius = pminX === Infinity ? 100 : Math.max(pmaxX - pminX, pmaxY - pminY, 40)
     const hs = planRadius / 100
 
-    const cats = hiddenCats || {}
     const layersOff = hiddenLayers || {}
-    const segGroups = {}
-    const bucketHandles = new Set()
-    const pushSeg = (cat, layer, a, b) => {
-      const key = String(cat) + '|' + String(layer)
-      if (!segGroups[key]) segGroups[key] = { cat, layer, pts: [] }
-      segGroups[key].pts.push(a, b)
-    }
-    const chainSegs = (cat, layer, item) => {
-      const pts = item.vertices || []
-      for (let i = 0; i + 1 < pts.length; i++) pushSeg(cat, layer, pts[i], pts[i + 1])
-      if (item.closed && pts.length > 2) pushSeg(cat, layer, pts[pts.length - 1], pts[0])
-    }
-    for (const category of ['racks', 'aisles', 'zones', 'agvs']) {
-      if (cats[category]) continue
-      for (const item of scene[category] || []) {
-        if (layersOff[item.layer]) continue
-        if (item.handle != null) bucketHandles.add(item.handle)
-        if (item.type === 'LINE' || item.type === 'LWPOLYLINE' || item.type === 'POLYLINE') {
-          chainSegs(category, item.layer, item)
-          continue
-        }
-        const object = buildItemObject(item, category, scene, hs)
-        if (!object) continue
-        object.traverse((child) => {
-          child.userData.item = item
-          child.userData.category = category
-        })
-        group.add(object)
-        pickables.push(object)
+    const devices = (scene.devices || []).filter((d) => d && !layersOff[d.layer])
+    const instByBlock = new Map()
+    const solidDevices = []
+    for (const d of devices) {
+      if (d.blockName) {
+        if (!instByBlock.has(d.blockName)) instByBlock.set(d.blockName, [])
+        instByBlock.get(d.blockName).push(d)
+      } else {
+        solidDevices.push(d)
       }
     }
-    // uncategorized entities still draw as flat floor-plan geometry in layer
-    // color — classification only colors/groups; it never hides the drawing.
-    let synth = 0
-    for (const e of scene.entities || []) {
-      if (e.handle != null && bucketHandles.has(e.handle)) continue
-      if (layersOff[e.layer]) continue
-      if (e.type === 'TEXT' || e.type === 'MTEXT') continue
-      if (e.type === 'LINE' || e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') {
-        chainSegs(null, e.layer, e)
-        continue
-      }
-      const item = Object.assign({ id: 'ent-' + (++synth) }, e)
-      const object = buildItemObject(item, null, scene, hs)
-      if (!object) continue
-      object.traverse((child) => {
-        child.userData.item = item
-        child.userData.category = null
+    const selSet = selected || new Set()
+    // one 2.5D curtain wall quad pair (dark base -> bright top gradient)
+    const pushWall = (pos, col, x1, y1, x2, y2, h, base, dark) => {
+      pos.push(x1, 0, -y1, x2, 0, -y2, x2, h, -y2, x1, 0, -y1, x2, h, -y2, x1, h, -y1)
+      col.push(
+        dark.r, dark.g, dark.b, dark.r, dark.g, dark.b, base.r, base.g, base.b,
+        dark.r, dark.g, dark.b, base.r, base.g, base.b, base.r, base.g, base.b,
+      )
+    }
+
+    // block devices: ONE InstancedMesh per blockName (logical devices stay
+    // independent through userData.instanceDevices[instanceId] -> device)
+    for (const [blockName, list] of instByBlock) {
+      void blockName
+      const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial(), list.length)
+      const m4 = new THREE.Matrix4()
+      const quat = new THREE.Quaternion()
+      const yAxis = new THREE.Vector3(0, 1, 0)
+      const scl = new THREE.Vector3()
+      const pos3 = new THREE.Vector3()
+      list.forEach((d, i) => {
+        const w = Math.max((d.size.width || 1) * (d.scale.x || 1), hs * 0.2)
+        const dep = Math.max((d.size.depth || 1) * (d.scale.y || 1), hs * 0.2)
+        const hgt = layerHeight(d.layer) * hs
+        quat.setFromAxisAngle(yAxis, -((d.rotation || 0) * Math.PI) / 180)
+        pos3.set(d.position.x, hgt / 2, -d.position.y)
+        scl.set(w, hgt, dep)
+        m4.compose(pos3, quat, scl)
+        mesh.setMatrixAt(i, m4)
+        mesh.setColorAt(i, new THREE.Color(selSet.has(d.id) ? 0xfacc15 : layerColor(scene, d.layer)))
       })
-      group.add(object)
-      pickables.push(object)
+      mesh.instanceMatrix.needsUpdate = true
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+      mesh.userData.instanceDevices = list
+      group.add(mesh)
+      pickables.push(mesh)
     }
-    // mass line segments render as 2.5D vertical curtain walls per
-    // category+layer (semantic height + dark-to-bright gradient) — flat
-    // drawings carry no Z, so depth comes from the equipment-family height.
-    for (const key of Object.keys(segGroups)) {
-      const g = segGroups[key]
-      const h = layerHeight(g.layer) * hs
-      const base = new THREE.Color(layerColor(scene, g.layer, g.cat ? CATEGORY_COLORS[g.cat] : 0x94a3b8))
-      const dark = base.clone().multiplyScalar(0.22)
+
+    // layer-group and isolated devices: merged into ONE curtain mesh per
+    // layer for performance (a 35k-entity plan would be 35k draw calls as
+    // separate meshes), with a triangle-range -> device map so every device
+    // keeps an independent logical id for pick and highlight.
+    const solidByLayer = new Map()
+    for (const d of solidDevices) {
+      if (!solidByLayer.has(d.layer)) solidByLayer.set(d.layer, [])
+      solidByLayer.get(d.layer).push(d)
+    }
+    for (const [layer, list] of solidByLayer) {
+      const h = layerHeight(layer) * hs
       const pos = []
       const col = []
-      for (let i = 0; i + 1 < g.pts.length; i += 2) {
-        const a = g.pts[i]
-        const b = g.pts[i + 1]
-        const y0a = (a.z || 0)
-        const y0b = (b.z || 0)
-        const a0 = [a.x, y0a, -a.y]
-        const b0 = [b.x, y0b, -b.y]
-        const a1 = [a.x, y0a + h, -a.y]
-        const b1 = [b.x, y0b + h, -b.y]
-        pos.push(...a0, ...b0, ...b1, ...a0, ...b1, ...a1)
-        col.push(
-          dark.r, dark.g, dark.b, dark.r, dark.g, dark.b, base.r, base.g, base.b,
-          dark.r, dark.g, dark.b, base.r, base.g, base.b, base.r, base.g, base.b,
-        )
+      const ranges = []
+      let triBase = 0
+      for (const d of list) {
+        const startTri = triBase
+        const base = new THREE.Color(selSet.has(d.id) ? 0xfacc15 : layerColor(scene, d.layer))
+        const dark = base.clone().multiplyScalar(0.22)
+        for (const c of d.children || []) {
+          const co = c.coords || []
+          if (c.geometryType === 'line' && co.length >= 4) {
+            pushWall(pos, col, co[0], co[1], co[2], co[3], h, base, dark)
+            triBase += 2
+          } else if (c.geometryType === 'polyline') {
+            for (let i = 0; i + 3 < co.length; i += 2) {
+              pushWall(pos, col, co[i], co[i + 1], co[i + 2], co[i + 3], h, base, dark)
+              triBase += 2
+            }
+          } else if (c.geometryType === 'arc' || c.geometryType === 'circle') {
+            const cx = co[0]
+            const cy = co[1]
+            const r = co[2] || 0
+            const s0 = c.geometryType === 'circle' ? 0 : (co[3] || 0)
+            const s1 = c.geometryType === 'circle' ? Math.PI * 2 : (co[4] || 0)
+            let prevX = cx + r * Math.cos(s0)
+            let prevY = cy + r * Math.sin(s0)
+            for (let s = 1; s <= 24; s++) {
+              const t = s0 + ((s1 - s0) * s) / 24
+              const x = cx + r * Math.cos(t)
+              const y = cy + r * Math.sin(t)
+              pushWall(pos, col, prevX, prevY, x, y, h, base, dark)
+              triBase += 2
+              prevX = x
+              prevY = y
+            }
+          }
+        }
+        ranges.push({ device: d, start: startTri, end: triBase })
       }
+      if (pos.length === 0) continue
       const geom = new THREE.BufferGeometry()
       geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
       geom.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
-      group.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })))
+      const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
+      mesh.userData.deviceRanges = ranges
+      group.add(mesh)
+      pickables.push(mesh)
     }
     scene3.add(group)
     pickablesRef.current = pickables
@@ -299,8 +324,10 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
     // Default environment — ground plane + grid + a visible sun — sized to the
     // content (or a small playground before anything is parsed), so the scene
     // always has a horizon to orbit against.
-    const bounds = new THREE.Box3().setFromObject(group)
-    const empty = bounds.isEmpty()
+    const bounds = pminX === Infinity
+      ? new THREE.Box3(new THREE.Vector3(-20, 0, -20), new THREE.Vector3(20, 1, 20))
+      : new THREE.Box3(new THREE.Vector3(pminX, 0, -pmaxY), new THREE.Vector3(pmaxX, 12 * hs, -pminY))
+    const empty = pminX === Infinity
     const center = empty ? new THREE.Vector3(0, 0, 0) : bounds.getCenter(new THREE.Vector3())
     const size = empty ? new THREE.Vector3(40, 0, 40) : bounds.getSize(new THREE.Vector3())
     const radius = Math.max(size.x, size.z, size.y, 40)
@@ -367,8 +394,20 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       raycaster.setFromCamera(pointer, camera)
       const hits = raycaster.intersectObjects(pickables, true)
       if (hits.length > 0) {
-        const hit = hits[0].object
-        onSelect({ item: hit.userData.item || null, category: hit.userData.category || null })
+        const hit = hits[0]
+        const obj = hit.object
+        if (obj.isInstancedMesh && obj.userData.instanceDevices && obj.userData.instanceDevices[hit.instanceId]) {
+          onSelect({ item: null, category: null, device: obj.userData.instanceDevices[hit.instanceId] })
+        } else if (obj.userData.deviceRanges && hit.faceIndex != null) {
+          const range = obj.userData.deviceRanges.find((x) => hit.faceIndex >= x.start && hit.faceIndex < x.end)
+          onSelect({ item: null, category: null, device: range ? range.device : null })
+        } else if (obj.userData.device) {
+          onSelect({ item: null, category: null, device: obj.userData.device })
+        } else if (obj.userData.item) {
+          onSelect({ item: obj.userData.item, category: obj.userData.category || null })
+        } else {
+          onSelect(null)
+        }
       } else {
         onSelect(null)
       }
@@ -719,6 +758,7 @@ function InfoPanel({ scene, selection }) {
       {dev ? (
         <div>
           <div><span style={styles.label}>设备</span><strong>{dev.name || dev.id}</strong>{dev.name ? ' · ' + dev.id : ''}</div>
+          <div><span style={styles.label}>类型</span>{dev.type}{dev.blockName ? ' · 块 ' + dev.blockName : ''}</div>
           <div><span style={styles.label}>图层</span>{dev.layer}</div>
           <div><span style={styles.label}>尺寸</span>{Math.round(dev.size.width * 10) / 10} × {Math.round(dev.size.depth * 10) / 10}</div>
           <div><span style={styles.label}>图元</span>{dev.entityCount} 个</div>
@@ -1350,7 +1390,7 @@ function CadSceneBuilderPanel() {
       setSelection(null)
       return
     }
-    const device = sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null
+    const device = sel.device || (sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null)
     setSelection({ item: sel.item || null, category: sel.category || null, device })
   }
   const selectDevice = (device) => setSelection({ item: null, category: null, device })
@@ -1573,7 +1613,7 @@ function SceneToolCard(props) {
         </div>
       ) : (
         <div style={{ height: 380, display: 'flex' }}>
-          <SceneCanvas scene={scene} selected={selectedSetOf(selection)} onSelect={(sel) => setSelection(sel ? { item: sel.item || null, category: sel.category || null, device: sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null } : null)} />
+          <SceneCanvas scene={scene} selected={selectedSetOf(selection)} onSelect={(sel) => setSelection(sel ? { item: sel.item || null, category: sel.category || null, device: sel.device || (sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null) } : null)} />
         </div>
       )}
       <InfoPanel scene={scene} selection={selection} />
