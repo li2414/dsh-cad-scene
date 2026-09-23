@@ -159,7 +159,7 @@ function buildItemObject(item, category, scene, hs) {
 
 // ── three.js canvas ─────────────────────────────────────────────────────────
 
-function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) {
+function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
   const hostRef = useRef(null)
   const pickablesRef = useRef([])
 
@@ -423,12 +423,13 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
       object.traverse((child) => {
         const material = child.material
         if (material && 'emissive' in material) {
-          const selected = selectedId !== null && child.userData.item && child.userData.item.id === selectedId
-          material.emissive.setHex(selected ? 0x666666 : 0x000000)
+          const it = child.userData.item
+          const isSel = selected && it && (selected.has(it.id) || (it.handle != null && selected.has(String(it.handle))))
+          material.emissive.setHex(isSel ? 0x666666 : 0x000000)
         }
       })
     }
-  }, [selectedId])
+  }, [selected])
 
   return <div ref={hostRef} style={{ flex: 1, minHeight: 320, borderRadius: 8, overflow: 'hidden', lineHeight: 0 }} />
 }
@@ -640,6 +641,8 @@ const IMPORT_CSS = `
 .cad-p-mini:hover{opacity:1;border-color:rgba(56,189,248,.6)}
 .cad-im-dl{background:linear-gradient(135deg,#059669,#10b981);box-shadow:0 6px 18px rgba(16,185,129,.3);animation:cad-im-rise .3s ease}
 .cad-im-dl:hover:not(:disabled){box-shadow:0 10px 24px rgba(16,185,129,.45)}
+.cad-p-edit-input{width:100%;box-sizing:border-box;padding:4px 8px;border-radius:6px;border:1px solid rgba(56,189,248,.35);background:rgba(8,16,34,.6);color:inherit;font-size:11px}
+.cad-p-layer[data-sel='true']{background:rgba(56,189,248,.16)}
 `
 
 function ensureImportStyles() {
@@ -674,11 +677,36 @@ class PanelErrorBoundary extends Component {
   }
 }
 
-function InfoPanel({ scene, selection }) {
-  if (!selection || !selection.item) {
-    return <div style={styles.info}>点击场景中的实体，查看其图层与文本信息</div>
+function deviceForHandle(scene, handle) {
+  if (!scene || handle == null) return null
+  const h = String(handle)
+  for (const d of scene.devices || []) {
+    if ((d.handles || []).some((x) => String(x) === h)) return d
   }
-  const { item, category } = selection
+  return null
+}
+
+function selectedSetOf(selection) {
+  if (!selection) return null
+  const s = new Set()
+  if (selection.item) {
+    s.add(selection.item.id)
+    if (selection.item.handle != null) s.add(String(selection.item.handle))
+  }
+  if (selection.device) {
+    s.add(selection.device.id)
+    for (const h of selection.device.handles || []) s.add(String(h))
+  }
+  return s.size > 0 ? s : null
+}
+
+function InfoPanel({ scene, selection }) {
+  if (!selection || (!selection.item && !selection.device)) {
+    return <div style={styles.info}>点击场景中的实体或设备清单条目查看详情</div>
+  }
+  const dev = selection.device
+  const item = selection.item
+  const category = selection.category
   const layers = Array.isArray(scene.layers) ? scene.layers : []
   const layer = layers.find((l) => l && l.name === item.layer)
   const texts = (Array.isArray(scene.entities) ? scene.entities : [])
@@ -687,17 +715,29 @@ function InfoPanel({ scene, selection }) {
   const anchor = item.position || item.center || (Array.isArray(item.vertices) && item.vertices[0]) || null
   return (
     <div style={styles.info}>
-      <div>
-        <span style={styles.label}>实体</span>
-        <strong>{item.id}</strong>{' · '}{item.type}{category ? ` · ${CATEGORY_LABELS[category]}` : ''}
-      </div>
-      <div>
-        <span style={styles.label}>图层</span>{item.layer}
-        {layer ? <span style={{ marginLeft: 8, opacity: 0.8 }}>{layer.visible === false ? '隐藏' : '可见'}{layer.frozen ? ' · 冻结' : ''}</span> : null}
-      </div>
-      {item.block ? <div><span style={styles.label}>块引用</span>{item.block}</div> : null}
-      {anchor ? <div><span style={styles.label}>位置</span>({Math.round(anchor.x * 100) / 100}, {Math.round(anchor.y * 100) / 100})</div> : null}
-      {item.text ? <div><span style={styles.label}>文本</span>{item.text}</div> : null}
+      {dev ? (
+        <div>
+          <div><span style={styles.label}>设备</span><strong>{dev.name || dev.id}</strong>{dev.name ? ' · ' + dev.id : ''}</div>
+          <div><span style={styles.label}>图层</span>{dev.layer}</div>
+          <div><span style={styles.label}>尺寸</span>{Math.round(dev.size.width * 10) / 10} × {Math.round(dev.size.depth * 10) / 10}</div>
+          <div><span style={styles.label}>图元</span>{dev.entityCount} 个</div>
+        </div>
+      ) : null}
+      {item ? (
+        <div>
+          <div>
+            <span style={styles.label}>实体</span>
+            <strong>{item.id}</strong>{' · '}{item.type}{category ? ` · ${CATEGORY_LABELS[category]}` : ''}
+          </div>
+          <div>
+            <span style={styles.label}>图层</span>{item.layer}
+            {layer ? <span style={{ marginLeft: 8, opacity: 0.8 }}>{layer.visible === false ? '隐藏' : '可见'}{layer.frozen ? ' · 冻结' : ''}</span> : null}
+          </div>
+          {item.block ? <div><span style={styles.label}>块引用</span>{item.block}</div> : null}
+          {anchor ? <div><span style={styles.label}>位置</span>({Math.round(anchor.x * 100) / 100}, {Math.round(anchor.y * 100) / 100})</div> : null}
+          {item.text ? <div><span style={styles.label}>文本</span>{item.text}</div> : null}
+        </div>
+      ) : null}
       {texts.length > 0 ? (
         <div>
           <span style={styles.label}>同层文本</span>
@@ -870,6 +910,43 @@ function GeneratedLegend({ scene, hiddenLayers, onToggleLayer }) {
 
 const TYPE_PALETTE = ['#60a5fa', '#f97316', '#34d399', '#f472b6', '#a78bfa', '#facc15', '#22d3ee', '#fb7185', '#94a3b8']
 
+// Per-device inventory generated from geometry clusters (scene.devices).
+function DeviceList({ scene, selection, onSelect }) {
+  const [query, setQuery] = useState('')
+  const devices = scene.devices || []
+  const q = query.trim().toLowerCase()
+  const filtered = q === '' ? devices : devices.filter((d) =>
+    String(d.name || '').toLowerCase().includes(q) || String(d.id).includes(q) || String(d.layer).toLowerCase().includes(q))
+  const shown = filtered.slice(0, 300)
+  return (
+    <div className="cad-p-card">
+      <h4>设备清单 · {devices.length} 台（点击选中整台）</h4>
+      <input
+        className="cad-p-edit-input"
+        placeholder="搜索 名称/编号/图层…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="cad-p-layers" style={{ maxHeight: 260, marginTop: 6 }}>
+        {shown.map((d) => {
+          const isSel = selection && selection.device && selection.device.id === d.id
+          return (
+            <div key={d.id} className="cad-p-layer" data-sel={isSel ? 'true' : 'false'} onClick={() => onSelect(d)}>
+              <span className="cad-p-dot" style={{ background: hex(layerColor(scene, d.layer)) }} />
+              <span className="nm">{d.name || d.id}</span>
+              <span className="cnt">{d.entityCount}</span>
+            </div>
+          )
+        })}
+        {filtered.length === 0 ? <div style={{ opacity: 0.6 }}>无匹配设备</div> : null}
+        {filtered.length > shown.length ? (
+          <div style={{ opacity: 0.6, padding: '2px 6px' }}>…还有 {filtered.length - shown.length} 台（缩小搜索范围）</div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function StatsCard({ scene }) {
   const meta = scene.meta || {}
   const counts = {}
@@ -894,6 +971,10 @@ function StatsCard({ scene }) {
       <div className="cad-p-row">
         <span className="k">实体总数</span>
         <b>{meta.entityCount !== undefined ? meta.entityCount : (scene.entities || []).length}</b>
+      </div>
+      <div className="cad-p-row">
+        <span className="k">设备数</span>
+        <b>{(scene.devices || []).length}</b>
       </div>
       {meta.truncated ? <div className="cad-p-logline cad-p-warn">⚠ 实体超上限已截断</div> : null}
       <div className="cad-p-bar">
@@ -981,7 +1062,7 @@ function makePrim(item, category, color) {
   return null
 }
 
-function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) {
+function DrawingCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
   const hostRef = useRef(null)
   const primsRef = useRef([])
   const textsRef = useRef([])
@@ -1097,11 +1178,11 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
 
       // geometry in layer colors; selection glows yellow
       for (const prim of prims) {
-        const sel = selectedId != null && prim.item.id === selectedId
-        ctx2d.strokeStyle = sel ? '#facc15' : prim.color
+        const isSel = selected && prim.item && (selected.has(prim.item.id) || (prim.item.handle != null && selected.has(String(prim.item.handle))))
+        ctx2d.strokeStyle = isSel ? '#facc15' : prim.color
         ctx2d.fillStyle = ctx2d.strokeStyle
-        ctx2d.lineWidth = sel ? 2.6 : 1.4
-        if (sel) { ctx2d.shadowColor = 'rgba(250,204,21,0.8)'; ctx2d.shadowBlur = 8 } else { ctx2d.shadowBlur = 0 }
+        ctx2d.lineWidth = isSel ? 2.6 : 1.4
+        if (isSel) { ctx2d.shadowColor = 'rgba(250,204,21,0.8)'; ctx2d.shadowBlur = 8 } else { ctx2d.shadowBlur = 0 }
         if (prim.kind === 'poly') {
           ctx2d.beginPath()
           prim.pts.forEach((p, i) => { if (i === 0) ctx2d.moveTo(mx(p.x), my(p.y)); else ctx2d.lineTo(mx(p.x), my(p.y)) })
@@ -1131,7 +1212,7 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
       // text annotations in layer colors
       ctx2d.font = '12px ui-monospace, Consolas, monospace'
       for (const t of texts) {
-        ctx2d.fillStyle = selectedId === t.item.id ? '#facc15' : t.color
+        ctx2d.fillStyle = (selected && selected.has(t.item.id)) ? '#facc15' : t.color
         ctx2d.fillText(String(t.text).slice(0, 48), mx(t.p.x), my(t.p.y))
       }
     }
@@ -1242,7 +1323,7 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
       canvas.removeEventListener('click', onClick)
       if (canvas.parentNode === host) host.removeChild(canvas)
     }
-  }, [scene, hiddenCats, hiddenLayers, selectedId])
+  }, [scene, hiddenCats, hiddenLayers, selected])
 
   return <div ref={hostRef} style={{ flex: 1, minHeight: 320, borderRadius: 8, overflow: 'hidden', lineHeight: 0 }} />
 }
@@ -1262,6 +1343,17 @@ function CadSceneBuilderPanel() {
   useEffect(() => { ensureImportStyles() }, [])
 
   const toggleLayer = (name) => setHiddenLayers((h) => Object.assign({}, h, { [name]: !h[name] }))
+
+  const handleSelect = (sel) => {
+    if (!sel) {
+      setSelection(null)
+      return
+    }
+    const device = sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null
+    setSelection({ item: sel.item || null, category: sel.category || null, device })
+  }
+  const selectDevice = (device) => setSelection({ item: null, category: null, device })
+  const selectedSet = selectedSetOf(selection)
 
   const acceptFile = (file) => {
     if (!file) return
@@ -1390,6 +1482,7 @@ function CadSceneBuilderPanel() {
           ) : null}
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
+        {scene ? <DeviceList scene={scene} selection={selection} onSelect={selectDevice} /> : null}
         {scene ? <StatsCard scene={scene} /> : null}
         {scene ? <ParseLog scene={scene} /> : null}
       </div>
@@ -1403,9 +1496,9 @@ function CadSceneBuilderPanel() {
         </div>
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
           {view2d ? (
-            <DrawingCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenLayers={hiddenLayers} />
+            <DrawingCanvas scene={scene || EMPTY_SCENE} selected={selectedSet} onSelect={handleSelect} hiddenLayers={hiddenLayers} />
           ) : (
-            <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenLayers={hiddenLayers} />
+            <SceneCanvas scene={scene || EMPTY_SCENE} selected={selectedSet} onSelect={handleSelect} hiddenLayers={hiddenLayers} />
           )}
           {!scene ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
@@ -1479,7 +1572,7 @@ function SceneToolCard(props) {
         </div>
       ) : (
         <div style={{ height: 380, display: 'flex' }}>
-          <SceneCanvas scene={scene} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
+          <SceneCanvas scene={scene} selected={selectedSetOf(selection)} onSelect={(sel) => setSelection(sel ? { item: sel.item || null, category: sel.category || null, device: sel.item && sel.item.handle != null ? deviceForHandle(scene, sel.item.handle) : null } : null)} />
         </div>
       )}
       <InfoPanel scene={scene} selection={selection} />

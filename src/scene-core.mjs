@@ -136,6 +136,120 @@ function normalizeBlocks(parsed) {
     }))
 }
 
+/**
+ * Cluster entities into individual device units: geometry that touches or
+ * nearly touches forms one device (grid-hashed union-find, tolerant to
+ * 50k-entity drawings), annotated with the nearest TEXT as its name and
+ * keeping the ORIGINAL layer name as its type. Annotation layers never form
+ * devices.
+ */
+export function clusterDevices(entities, planRadius) {
+  const tol = Math.max((planRadius || 100) * 0.002, 1e-6)
+  const parts = []
+  const texts = []
+  entities.forEach((e, index) => {
+    if (e.type === 'TEXT' || e.type === 'MTEXT') {
+      texts.push(e)
+      return
+    }
+    if (/dim|标注|note|text/i.test(e.layer || '')) return
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    const eat = (p) => {
+      if (!p || typeof p.x !== 'number') return
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+    }
+    eat(e.position); eat(e.center)
+    for (const v of e.vertices || []) eat(v)
+    for (const p of (e.controlPoints || []).concat(e.fitPoints || [], e.points || [])) eat(p)
+    if (typeof e.radius === 'number' && e.center) {
+      eat({ x: e.center.x - e.radius, y: e.center.y - e.radius })
+      eat({ x: e.center.x + e.radius, y: e.center.y + e.radius })
+    }
+    if (minX === Infinity) return
+    parts.push({ index, handle: e.handle != null ? String(e.handle) : 'idx-' + index, layer: e.layer || '0', minX, minY, maxX, maxY })
+  })
+  if (parts.length === 0) return []
+
+  const parent = parts.map((_, i) => i)
+  const find = (i) => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i] }
+    return i
+  }
+  const union = (a, b) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[rb] = ra
+  }
+  const cell = Math.max(tol * 5, (planRadius || 100) / 100)
+  const grid = new Map()
+  parts.forEach((p, i) => {
+    const x0 = Math.floor((p.minX - tol) / cell)
+    const x1 = Math.floor((p.maxX + tol) / cell)
+    const y0 = Math.floor((p.minY - tol) / cell)
+    const y1 = Math.floor((p.maxY + tol) / cell)
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) {
+        const key = gx + ',' + gy
+        for (const j of grid.get(key) || []) {
+          const q = parts[j]
+          if (p.minX - tol <= q.maxX && q.minX - tol <= p.maxX && p.minY - tol <= q.maxY && q.minY - tol <= p.maxY) {
+            union(i, j)
+          }
+        }
+        if (!grid.has(key)) grid.set(key, [])
+        grid.get(key).push(i)
+      }
+    }
+  })
+
+  const groups = new Map()
+  parts.forEach((p, i) => {
+    const r = find(i)
+    if (!groups.has(r)) groups.set(r, [])
+    groups.get(r).push(p)
+  })
+
+  const devices = []
+  let n = 0
+  for (const members of groups.values()) {
+    n += 1
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    const layers = {}
+    for (const m of members) {
+      minX = Math.min(minX, m.minX); minY = Math.min(minY, m.minY)
+      maxX = Math.max(maxX, m.maxX); maxY = Math.max(maxY, m.maxY)
+      layers[m.layer] = (layers[m.layer] || 0) + 1
+    }
+    const layer = Object.keys(layers).sort((a, b) => layers[b] - layers[a])[0] || '0'
+    const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+    let name = null
+    let best = Infinity
+    const reach = tol * 6
+    for (const t of texts) {
+      const p = t.position
+      if (!p || !t.text) continue
+      const dx = Math.max(minX - p.x, 0, p.x - maxX)
+      const dy = Math.max(minY - p.y, 0, p.y - maxY)
+      const d = dx * dx + dy * dy
+      if (d < best && d <= reach * reach) {
+        best = d
+        name = String(t.text)
+      }
+    }
+    devices.push({
+      id: 'dev-' + n,
+      layer,
+      name: name ? name.slice(0, 60) : null,
+      center,
+      size: { width: maxX - minX, depth: maxY - minY },
+      entityCount: members.length,
+      handles: members.map((m) => m.handle),
+    })
+  }
+  return devices
+}
+
 export function buildScene(parsed, sourceName, sourceFormat) {
   const CAP = 50000
   const racks = []
@@ -185,12 +299,16 @@ export function buildScene(parsed, sourceName, sourceFormat) {
     }
   }
 
+  const planRadius = span ? Math.max(span.width, span.height) : 100
+  const devices = clusterDevices(entities, planRadius)
+
   return {
     racks,
     aisles,
     zones,
     agvs,
     entities,
+    devices,
     layers,
     meta: {
       source: sourceName,
@@ -218,6 +336,7 @@ export function summarizeScene(scene) {
     zones: [],
     agvs: [],
     entities: [],
+    devices: [],
     layers: scene.layers || [],
     meta: {
       source: meta.source,
@@ -227,6 +346,7 @@ export function summarizeScene(scene) {
       unclassified: meta.unclassified || 0,
       truncated: meta.truncated === true,
       summary: {
+        devices: (scene.devices || []).length,
         classified: {
           racks: (scene.racks || []).length,
           aisles: (scene.aisles || []).length,
