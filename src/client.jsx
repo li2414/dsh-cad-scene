@@ -82,7 +82,7 @@ function arcObject(center, radius, startAngle, endAngle, color) {
 }
 
 function buildItemObject(item, category, scene) {
-  const color = layerColor(scene, item.layer, CATEGORY_COLORS[category])
+  const color = layerColor(scene, item.layer, CATEGORY_COLORS[category] || 0x94a3b8)
   switch (item.type) {
     case 'INSERT': {
       const w = category === 'agvs' ? 1.2 : 2.4
@@ -152,10 +152,27 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const pickables = []
     const cats = hiddenCats || {}
     const layersOff = hiddenLayers || {}
+    const segGroups = {}
+    const bucketHandles = new Set()
+    const pushSeg = (cat, layer, a, b) => {
+      const key = String(cat) + '|' + String(layer)
+      if (!segGroups[key]) segGroups[key] = { cat, layer, pts: [] }
+      segGroups[key].pts.push(a.x, 0.1, -a.y, b.x, 0.1, -b.y)
+    }
+    const chainSegs = (cat, layer, item) => {
+      const pts = item.vertices || []
+      for (let i = 0; i + 1 < pts.length; i++) pushSeg(cat, layer, pts[i], pts[i + 1])
+      if (item.closed && pts.length > 2) pushSeg(cat, layer, pts[pts.length - 1], pts[0])
+    }
     for (const category of ['racks', 'aisles', 'zones', 'agvs']) {
       if (cats[category]) continue
       for (const item of scene[category] || []) {
         if (layersOff[item.layer]) continue
+        if (item.handle != null) bucketHandles.add(item.handle)
+        if (item.type === 'LINE' || item.type === 'LWPOLYLINE' || item.type === 'POLYLINE') {
+          chainSegs(category, item.layer, item)
+          continue
+        }
         const object = buildItemObject(item, category, scene)
         if (!object) continue
         object.traverse((child) => {
@@ -165,6 +182,35 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
         group.add(object)
         pickables.push(object)
       }
+    }
+    // uncategorized entities still draw as flat floor-plan geometry in layer
+    // color — classification only colors/groups; it never hides the drawing.
+    let synth = 0
+    for (const e of scene.entities || []) {
+      if (e.handle != null && bucketHandles.has(e.handle)) continue
+      if (layersOff[e.layer]) continue
+      if (e.type === 'TEXT' || e.type === 'MTEXT') continue
+      if (e.type === 'LINE' || e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') {
+        chainSegs(null, e.layer, e)
+        continue
+      }
+      const item = Object.assign({ id: 'ent-' + (++synth) }, e)
+      const object = buildItemObject(item, null, scene)
+      if (!object) continue
+      object.traverse((child) => {
+        child.userData.item = item
+        child.userData.category = null
+      })
+      group.add(object)
+      pickables.push(object)
+    }
+    // mass line segments batched per category+layer (one draw call each)
+    for (const key of Object.keys(segGroups)) {
+      const g = segGroups[key]
+      const geom = new THREE.BufferGeometry()
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(g.pts, 3))
+      const color = layerColor(scene, g.layer, g.cat ? CATEGORY_COLORS[g.cat] : 0x94a3b8)
+      group.add(new THREE.LineSegments(geom, new THREE.LineBasicMaterial({ color })))
     }
     scene3.add(group)
     pickablesRef.current = pickables
@@ -611,7 +657,7 @@ function StatsCard({ scene }) {
   )
 }
 
-const RENDERABLE_TYPES = new Set(['INSERT', 'LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE'])
+const RENDERABLE_TYPES = new Set(['INSERT', 'LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE', 'TEXT', 'MTEXT', 'POINT'])
 
 function ParseLog({ scene }) {
   const [open, setOpen] = useState(false)
@@ -624,9 +670,12 @@ function ParseLog({ scene }) {
   const fmt = String(meta.format || 'dxf')
   lines.push({ kind: 'info', text: '解析格式: ' + fmt + (fmt.indexOf('dwg') === 0 ? '（经外部转换器）' : '（浏览器内解析）') })
   if (meta.truncated) lines.push({ kind: 'warn', text: '实体超上限已截断，仅保留前 ' + (scene.entities || []).length + ' 个' })
+  if (meta.unclassified > 0) {
+    lines.push({ kind: 'warn', text: '未分类实体 ' + meta.unclassified + ' 个（未匹配分类词表，已按图层色绘制）' })
+  }
   const unrendered = Object.entries(counts)
   if (unrendered.length > 0) {
-    lines.push({ kind: 'warn', text: '仅解析、未在 3D 绘制: ' + unrendered.map((e) => e[0] + '×' + e[1]).join('、') })
+    lines.push({ kind: 'warn', text: '两侧视图均未绘制: ' + unrendered.map((e) => e[0] + '×' + e[1]).join('、') })
   }
   lines.push({ kind: 'info', text: '图层 ' + ((scene.layers || []).length) + ' 个 · 块定义 ' + ((meta.blocks || []).length) + ' 个' })
   if (meta.source) lines.push({ kind: 'info', text: meta.source })
@@ -699,13 +748,22 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
     for (const l of scene.layers || []) colorOf[l.name] = l.color > 0 ? hex(l.color) : '#94a3b8'
     const prims = []
     const texts = []
+    const bucketByHandle = {}
     for (const category of ['racks', 'aisles', 'zones', 'agvs']) {
-      if (cats[category]) continue
       for (const item of scene[category] || []) {
-        if (layersOff[item.layer]) continue
-        const prim = makePrim(item, category, colorOf[item.layer] || hex(CATEGORY_COLORS[category]))
-        if (prim) prims.push(prim)
+        if (item.handle != null) bucketByHandle[item.handle] = { item, category }
       }
+    }
+    let synth = 0
+    for (const e of scene.entities || []) {
+      if (layersOff[e.layer]) continue
+      const bucketed = e.handle != null ? bucketByHandle[e.handle] : null
+      if (bucketed && cats[bucketed.category]) continue
+      const item = bucketed ? bucketed.item : Object.assign({ id: 'ent-' + (++synth) }, e)
+      const category = bucketed ? bucketed.category : null
+      const color = colorOf[e.layer] || (category ? hex(CATEGORY_COLORS[category]) : '#94a3b8')
+      const prim = makePrim(item, category, color)
+      if (prim) prims.push(prim)
     }
     let textIndex = 0
     for (const e of scene.entities || []) {
