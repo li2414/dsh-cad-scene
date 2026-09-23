@@ -19,7 +19,7 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { parseDxfToScene } from './scene-core.mjs'
+import { parseDxfToScene, buildDigest } from './scene-core.mjs'
 
 const inject = ['slots']
 
@@ -1569,6 +1569,25 @@ function CadSceneBuilderPanel() {
                 }, 2000)
               }}
             >⬇ 下载 JSON</button>
+          ) : null}
+          {scene ? (
+            <button
+              type="button"
+              className="cad-im-btn"
+              onClick={() => {
+                const blob = new Blob([JSON.stringify(buildDigest(scene), null, 2)], { type: 'application/json' })
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = String((scene.meta && scene.meta.source) || 'scene').replace(/\.[^.]+$/, '') + '.digest.json'
+                document.body.appendChild(a)
+                a.click()
+                setTimeout(() => {
+                  a.remove()
+                  URL.revokeObjectURL(url)
+                }, 2000)
+              }}
+            >⬇ digest 摘要</button>
           ) : null}
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
