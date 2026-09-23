@@ -1355,7 +1355,7 @@ function CadSceneBuilderPanel() {
                 a.download = dxfDownload.name
                 document.body.appendChild(a)
                 a.click()
-                a.remove()
+                setTimeout(() => a.remove(), 2000)
               }}
             >⬇ 下载 DXF</button>
           ) : null}
