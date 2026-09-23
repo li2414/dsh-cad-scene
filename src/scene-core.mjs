@@ -161,13 +161,37 @@ export function buildScene(parsed, sourceName, sourceFormat) {
     buckets[bucketName].push(Object.assign({ id: bucketName.slice(0, -1) + '-' + counters[bucketName] }, e))
   }
 
+  // per-layer counts + byType + plan bounds feed the summary mode and legend
+  const layerCounts = {}
+  const byType = {}
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const e of entities) {
+    layerCounts[e.layer] = (layerCounts[e.layer] || 0) + 1
+    byType[e.type] = (byType[e.type] || 0) + 1
+    const eat = (p) => {
+      if (!p) return
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+    }
+    eat(e.position); eat(e.center)
+    for (const v of e.vertices || []) eat(v)
+    for (const p of (e.controlPoints || []).concat(e.fitPoints || [], e.points || [])) eat(p)
+  }
+  const span = minX < Infinity ? { width: maxX - minX, height: maxY - minY } : null
+  const layers = normalizeLayers(parsed).map((l) => Object.assign({}, l, { count: layerCounts[l.name] || 0 }))
+  for (const name of Object.keys(layerCounts)) {
+    if (!layers.some((l) => l.name === name)) {
+      layers.push({ name, color: null, colorIndex: null, visible: true, frozen: false, count: layerCounts[name] })
+    }
+  }
+
   return {
     racks,
     aisles,
     zones,
     agvs,
     entities,
-    layers: normalizeLayers(parsed),
+    layers,
     meta: {
       source: sourceName,
       format: sourceFormat,
@@ -175,6 +199,43 @@ export function buildScene(parsed, sourceName, sourceFormat) {
       entityCount: entities.length,
       unclassified,
       truncated,
+      byType,
+      span,
+    },
+  }
+}
+
+/**
+ * Compact tool-friendly projection: identical top-level shape (so one output
+ * schema covers both modes) with the heavy arrays emptied and everything a
+ * model usually needs moved into layers[].count and meta.summary.
+ */
+export function summarizeScene(scene) {
+  const meta = scene.meta || {}
+  return {
+    racks: [],
+    aisles: [],
+    zones: [],
+    agvs: [],
+    entities: [],
+    layers: scene.layers || [],
+    meta: {
+      source: meta.source,
+      format: meta.format,
+      blocks: (meta.blocks || []).slice(0, 50),
+      entityCount: meta.entityCount || 0,
+      unclassified: meta.unclassified || 0,
+      truncated: meta.truncated === true,
+      summary: {
+        classified: {
+          racks: (scene.racks || []).length,
+          aisles: (scene.aisles || []).length,
+          zones: (scene.zones || []).length,
+          agvs: (scene.agvs || []).length,
+        },
+        byType: meta.byType || {},
+        span: meta.span || null,
+      },
     },
   }
 }

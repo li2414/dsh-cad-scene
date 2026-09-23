@@ -61,7 +61,9 @@ function shapeFrom(vertices) {
 function extrudePolygon(vertices, height, color) {
   const geometry = new THREE.ExtrudeGeometry(shapeFrom(vertices), { depth: height, bevelEnabled: false })
   geometry.rotateX(-Math.PI / 2)
-  return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color }))
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color }))
+  mesh.position.y = (vertices[0] && vertices[0].z) || 0
+  return mesh
 }
 
 function flatPolygon(vertices, color) {
@@ -71,12 +73,12 @@ function flatPolygon(vertices, color) {
     geometry,
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.28, side: THREE.DoubleSide }),
   )
-  mesh.position.y = 0.05
+  mesh.position.y = ((vertices[0] && vertices[0].z) || 0) + 0.05
   return mesh
 }
 
 function polylineObject(vertices, color, closed) {
-  const points = vertices.map((v) => new THREE.Vector3(v.x, 0.12, -v.y))
+  const points = vertices.map((v) => new THREE.Vector3(v.x, (v.z || 0) + 0.12, -v.y))
   if (closed && points.length > 2) points.push(points[0].clone())
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
@@ -87,7 +89,7 @@ function polylineObject(vertices, color, closed) {
 function arcObject(center, radius, startAngle, endAngle, color) {
   // y -> -z mirrors the plan, so the radian range is negated and swapped.
   const curve = new THREE.EllipseCurve(center.x, center.y, radius, radius, -endAngle, -startAngle, false)
-  const points = curve.getPoints(48).map((p) => new THREE.Vector3(p.x, 0.12, -p.y))
+  const points = curve.getPoints(48).map((p) => new THREE.Vector3(p.x, (center.z || 0) + 0.12, -p.y))
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
     new THREE.LineBasicMaterial({ color }),
@@ -106,7 +108,7 @@ function buildItemObject(item, category, scene) {
         new THREE.MeshStandardMaterial({ color }),
       )
       const p = item.position || { x: 0, y: 0 }
-      mesh.position.set(p.x, hgt / 2, -p.y)
+      mesh.position.set(p.x, hgt / 2 + (p.z || 0), -p.y)
       return mesh
     }
     case 'CIRCLE': {
@@ -116,7 +118,7 @@ function buildItemObject(item, category, scene) {
         new THREE.CylinderGeometry(item.radius || 1, item.radius || 1, RACK_HEIGHT, 24),
         new THREE.MeshStandardMaterial({ color }),
       )
-      mesh.position.set(c.x, RACK_HEIGHT / 2, -c.y)
+      mesh.position.set(c.x, RACK_HEIGHT / 2 + (c.z || 0), -c.y)
       return mesh
     }
     case 'LWPOLYLINE':
@@ -170,7 +172,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const pushSeg = (cat, layer, a, b) => {
       const key = String(cat) + '|' + String(layer)
       if (!segGroups[key]) segGroups[key] = { cat, layer, pts: [] }
-      segGroups[key].pts.push(a.x, 0.1, -a.y, b.x, 0.1, -b.y)
+      segGroups[key].pts.push(a.x, (a.z || 0) + 0.05, -a.y, b.x, (b.z || 0) + 0.05, -b.y)
     }
     const chainSegs = (cat, layer, item) => {
       const pts = item.vertices || []
@@ -235,7 +237,7 @@ function SceneCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }) 
     const empty = bounds.isEmpty()
     const center = empty ? new THREE.Vector3(0, 0, 0) : bounds.getCenter(new THREE.Vector3())
     const size = empty ? new THREE.Vector3(40, 0, 40) : bounds.getSize(new THREE.Vector3())
-    const radius = Math.max(size.x, size.z, 40)
+    const radius = Math.max(size.x, size.z, size.y, 40)
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(radius * 3, radius * 3),
@@ -366,8 +368,61 @@ async function fileToBase64(file) {
   return btoa(binary)
 }
 
-async function parseFile(file) {
+function runWorkerParse(name, content, format, onPhase) {
+  return new Promise((resolve, reject) => {
+    const phase = typeof onPhase === 'function' ? onPhase : () => {}
+    if (typeof Worker === 'undefined' || typeof __CAD_WORKER_SOURCE__ !== 'string') {
+      phase('解析中 · 主线程回退')
+      try {
+        resolve(parseDxfToScene(content, name, format))
+      } catch (error) {
+        reject(error)
+      }
+      return
+    }
+    let url = ''
+    let worker = null
+    try {
+      url = URL.createObjectURL(new Blob([__CAD_WORKER_SOURCE__], { type: 'text/javascript' }))
+      worker = new Worker(url)
+    } catch (error) {
+      try {
+        resolve(parseDxfToScene(content, name, format))
+      } catch (error2) {
+        reject(error2)
+      }
+      return
+    }
+    const cleanup = () => {
+      worker.terminate()
+      URL.revokeObjectURL(url)
+    }
+    worker.onmessage = (event) => {
+      const msg = event.data || {}
+      if (msg.phase) {
+        phase(msg.phase)
+        return
+      }
+      cleanup()
+      if (msg.error) reject(new Error(msg.error))
+      else resolve(msg.scene)
+    }
+    worker.onerror = () => {
+      cleanup()
+      try {
+        resolve(parseDxfToScene(content, name, format))
+      } catch (error) {
+        reject(error)
+      }
+    }
+    worker.postMessage({ name, content, format })
+  })
+}
+
+async function parseFile(file, onPhase) {
+  const phase = typeof onPhase === 'function' ? onPhase : () => {}
   if (/\.(dwg|step|stp)$/i.test(file.name)) {
+    phase('上传中 · Host 转换解析')
     const response = await fetch('/api/cad-scene-builder/parse', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -377,7 +432,8 @@ async function parseFile(file) {
     if (!response.ok || !payload.scene) throw new Error(payload.error || ('HTTP ' + response.status))
     return payload.scene
   }
-  return parseDxfToScene(await file.text(), file.name, 'dxf')
+  const text = await file.text()
+  return runWorkerParse(file.name, text, 'dxf', phase)
 }
 
 // ── shared components ───────────────────────────────────────────────────────
@@ -491,6 +547,11 @@ const IMPORT_CSS = `
 .cad-v-btn{padding:4px 14px;border:none;border-radius:8px;background:transparent;color:inherit;font-size:12px;cursor:pointer;transition:all .2s}
 .cad-v-btn[data-on='true']{background:linear-gradient(135deg,#2563eb,#06b6d4);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.4);font-weight:600}
 .cad-v-btn:hover:not([data-on='true']){background:rgba(148,163,184,.15)}
+.cad-p-gm{padding-left:22px}
+.cad-p-edit{display:flex;gap:4px;padding:2px 0 6px 22px}
+.cad-p-edit input{flex:1;min-width:0;padding:3px 8px;border-radius:6px;border:1px solid rgba(56,189,248,.4);background:rgba(8,16,34,.6);color:inherit;font-size:11px}
+.cad-p-mini{flex:none;width:22px;height:22px;border-radius:6px;border:1px solid rgba(148,163,184,.3);background:transparent;color:inherit;cursor:pointer;font-size:11px;line-height:1;opacity:.7}
+.cad-p-mini:hover{opacity:1;border-color:rgba(56,189,248,.6)}
 `
 
 function ensureImportStyles() {
@@ -568,7 +629,7 @@ function CategorySummary({ scene }) {
       {['racks', 'aisles', 'zones', 'agvs'].map((key) => (
         <span key={key} style={styles.chip}>
           <span style={styles.dot(hex(CATEGORY_COLORS[key]))} />
-          {CATEGORY_LABELS[key]} {(scene[key] || []).length}
+          {CATEGORY_LABELS[key]} {((scene[key] || []).length) || (meta.summary && meta.summary.classified ? meta.summary.classified[key] : 0)}
         </span>
       ))}
       {typeof meta.entityCount === 'number' ? <span style={{ opacity: 0.6 }}>实体 {meta.entityCount}</span> : null}
@@ -581,35 +642,139 @@ function CategorySummary({ scene }) {
 
 // ── left workbench cards ────────────────────────────────────────────────────
 
+function loadGroupMap(fileKey) {
+  try {
+    const raw = localStorage.getItem('dsh-cad-scene:groups')
+    const all = raw ? JSON.parse(raw) : {}
+    return all[fileKey] && typeof all[fileKey] === 'object' ? all[fileKey] : {}
+  } catch (e) { return {} }
+}
+
+function saveGroupMap(fileKey, map) {
+  try {
+    const raw = localStorage.getItem('dsh-cad-scene:groups')
+    const all = raw ? JSON.parse(raw) : {}
+    all[fileKey] = map
+    localStorage.setItem('dsh-cad-scene:groups', JSON.stringify(all))
+  } catch (e) { /* storage unavailable */ }
+}
+
 // Legend generated from the parsed content: one entry per layer the drawing
-// actually uses, keeping the ORIGINAL names — no fixed category list. Colors
-// come from the DXF layer table when present, else a stable per-layer palette.
+// actually uses, keeping the ORIGINAL names — no fixed category list. Layers
+// can be merged into named groups via the ✎ editor (persisted per drawing).
 function GeneratedLegend({ scene, hiddenLayers, onToggleLayer }) {
+  const fileKey = String((scene.meta && scene.meta.source) || '') + '|' + ((scene.entities || []).length)
+  const [groupMap, setGroupMap] = useState(() => loadGroupMap(fileKey))
+  const [editing, setEditing] = useState(null)
+  const [draft, setDraft] = useState('')
+
+  useEffect(() => {
+    setGroupMap(loadGroupMap(fileKey))
+    setEditing(null)
+    setDraft('')
+  }, [fileKey])
+
+  const assign = (layerName, groupName) => {
+    const next = Object.assign({}, groupMap)
+    const g = String(groupName || '').trim()
+    if (g === '' || g === layerName) delete next[layerName]
+    else next[layerName] = g
+    setGroupMap(next)
+    saveGroupMap(fileKey, next)
+    setEditing(null)
+    setDraft('')
+  }
+
   const counts = {}
   for (const e of scene.entities || []) counts[e.layer] = (counts[e.layer] || 0) + 1
   const table = {}
   for (const l of scene.layers || []) table[l.name] = l
-  const used = Object.keys(counts).sort((a, b) => counts[b] - counts[a])
-  for (const l of scene.layers || []) {
-    if (counts[l.name] === undefined) used.push(l.name)
+  const layerNames = Object.keys(counts)
+  for (const l of scene.layers || []) if (counts[l.name] === undefined) layerNames.push(l.name)
+
+  const groups = {}
+  for (const name of layerNames) {
+    const gname = groupMap[name] || name
+    if (!groups[gname]) groups[gname] = { name: gname, layers: [], count: 0, color: hex(layerColor(scene, name)) }
+    groups[gname].layers.push(name)
+    groups[gname].count += counts[name] || 0
   }
+  const ordered = Object.keys(groups).map((k) => groups[k]).sort((a, b) => b.count - a.count)
+  const existingGroups = Object.keys(groups).sort()
+
+  const toggleGroup = (g) => {
+    const anyVisible = g.layers.some((n) => !hiddenLayers[n])
+    for (const n of g.layers) {
+      if (anyVisible !== !!hiddenLayers[n]) onToggleLayer(n)
+    }
+  }
+
+  const renderEditor = (name) => (
+    <div className="cad-p-edit" onClick={(e) => e.stopPropagation()}>
+      <input
+        list="cad-p-group-options"
+        value={draft}
+        placeholder="合并到组名（留空=独立）"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') assign(name, draft) }}
+        autoFocus
+      />
+      <datalist id="cad-p-group-options">
+        {existingGroups.map((g) => <option key={g} value={g} />)}
+      </datalist>
+      <button type="button" className="cad-p-mini" onClick={() => assign(name, draft)}>✓</button>
+      <button type="button" className="cad-p-mini" onClick={() => setEditing(null)}>✕</button>
+    </div>
+  )
+
+  const renderLayerRow = (name, indent) => {
+    const l = table[name]
+    return (
+      <div key={name}>
+        <div
+          className={indent ? 'cad-p-layer cad-p-gm' : 'cad-p-layer'}
+          data-off={hiddenLayers[name] ? 'true' : 'false'}
+          onClick={() => onToggleLayer(name)}
+        >
+          <span className="cad-p-dot" style={{ background: hex(layerColor(scene, name)) }} />
+          <span className="nm">{name}</span>
+          {l && l.visible === false ? <span className="cad-p-badge">隐藏</span> : null}
+          {l && l.frozen ? <span className="cad-p-badge">冻结</span> : null}
+          <span className="cnt">{counts[name] || 0}</span>
+          <button
+            type="button"
+            className="cad-p-mini"
+            onClick={(e) => {
+              e.stopPropagation()
+              setDraft(groupMap[name] && groupMap[name] !== name ? groupMap[name] : '')
+              setEditing(editing === name ? null : name)
+            }}
+          >✎</button>
+        </div>
+        {editing === name ? renderEditor(name) : null}
+      </div>
+    )
+  }
+
   return (
     <div className="cad-p-card">
-      <h4>图例 · 按解析内容生成（{used.length} 组）</h4>
-      <div className="cad-p-layers" style={{ maxHeight: 260 }}>
-        {used.map((name) => {
-          const l = table[name]
+      <h4>图例 · 按解析内容生成（{ordered.length} 组 · ✎ 可合并/命名）</h4>
+      <div className="cad-p-layers" style={{ maxHeight: 300 }}>
+        {ordered.map((g) => {
+          if (g.layers.length === 1) return renderLayerRow(g.layers[0], false)
+          const allHidden = g.layers.every((n) => !!hiddenLayers[n])
           return (
-            <div key={name} className="cad-p-layer" data-off={hiddenLayers[name] ? 'true' : 'false'} onClick={() => onToggleLayer(name)}>
-              <span className="cad-p-dot" style={{ background: hex(layerColor(scene, name)) }} />
-              <span className="nm">{name}</span>
-              {l && l.visible === false ? <span className="cad-p-badge">隐藏</span> : null}
-              {l && l.frozen ? <span className="cad-p-badge">冻结</span> : null}
-              <span className="cnt">{counts[name] || 0}</span>
+            <div key={g.name}>
+              <div className="cad-p-layer" data-off={allHidden ? 'true' : 'false'} onClick={() => toggleGroup(g)}>
+                <span className="cad-p-dot" style={{ background: g.color }} />
+                <span className="nm"><b>{g.name}</b></span>
+                <span className="cnt">{g.count}</span>
+              </div>
+              {g.layers.map((name) => renderLayerRow(name, true))}
             </div>
           )
         })}
-        {used.length === 0 ? <div style={{ opacity: 0.6 }}>无图层内容</div> : null}
+        {ordered.length === 0 ? <div style={{ opacity: 0.6 }}>无图层内容</div> : null}
       </div>
     </div>
   )
@@ -1024,7 +1189,7 @@ function CadSceneBuilderPanel() {
     setBusy(true)
     setFileState((s) => Object.assign({}, s, { status: 'parsing', error: null }))
     try {
-      const result = await parseFile(file)
+      const result = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })))
       setScene(result)
       setFileState((s) => Object.assign({}, s, { status: 'done' }))
     } catch (error) {
@@ -1043,7 +1208,7 @@ function CadSceneBuilderPanel() {
 
   const statusText = !fileState ? '尚未选择文件'
     : fileState.status === 'ready' ? '待解析'
-    : fileState.status === 'parsing' ? '解析中…'
+    : fileState.status === 'parsing' ? (fileState.phase || '解析中…')
     : fileState.status === 'done' ? '解析完成'
     : '解析失败'
 
@@ -1197,9 +1362,21 @@ function SceneToolCard(props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 0' }}>
       <CategorySummary scene={scene} />
-      <div style={{ height: 380, display: 'flex' }}>
-        <SceneCanvas scene={scene} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
-      </div>
+      {scene.meta && scene.meta.summary && (scene.entities || []).length === 0 ? (
+        <div style={styles.info}>
+          <div><b>摘要模式</b>（detail: 'full' 返回全量实体）</div>
+          {Object.entries(scene.meta.summary.byType || {}).map((t) => (
+            <div key={t[0]}><span style={styles.label}>{t[0]}</span>{t[1]}</div>
+          ))}
+          {(scene.layers || []).slice(0, 24).map((l) => (
+            <div key={l.name}><span style={styles.label}>{l.name}</span>{l.count}</div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ height: 380, display: 'flex' }}>
+          <SceneCanvas scene={scene} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} />
+        </div>
+      )}
       <InfoPanel scene={scene} selection={selection} />
     </div>
   )
