@@ -1018,6 +1018,76 @@ function DeviceList({ scene, selection, onSelect }) {
   )
 }
 
+// ── AI device recognition ───────────────────────────────────────────────────
+
+function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIdentify, onBindChange, onRemove, onExport }) {
+  const modelKeys = catalog && catalog.model_library ? Object.keys(catalog.model_library) : []
+  const groups = binding && binding.group_bindings ? binding.group_bindings : []
+  const devices = binding && binding.devices ? binding.devices : []
+  const unmatched = binding && binding.unmatched ? binding.unmatched : []
+  const badge = (c) => (c == null ? '' : c >= 0.75 ? '高' : c >= 0.5 ? '中' : '待确认')
+  const miniBtn = { width: 'auto', padding: '3px 10px', display: 'inline-flex' }
+  const renderModelSelect = (value, onPick) => (
+    <select
+      className="cad-p-edit-input"
+      style={{ width: 110, flex: 'none' }}
+      value={value || ''}
+      onChange={(e) => onPick(e.target.value)}
+    >
+      <option value="">（占位）</option>
+      {modelKeys.map((k) => <option key={k} value={k}>{k}</option>)}
+    </select>
+  )
+  return (
+    <div className="cad-p-card">
+      <h4>AI 设备识别{binding ? ' · 已出结果' : ''}</h4>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <label className="cad-p-mini" style={{ ...miniBtn, cursor: 'pointer' }}>
+          载入型号库
+          <input
+            type="file"
+            accept=".json"
+            style={{ display: 'none' }}
+            onChange={(e) => { onCatalog(e.target.files && e.target.files[0]); e.target.value = '' }}
+          />
+        </label>
+        <button type="button" className="cad-p-mini" style={miniBtn} disabled={!scene || busy} onClick={onIdentify}>
+          {busy ? '识别中…' : 'AI 识别设备'}
+        </button>
+        {binding ? (
+          <button type="button" className="cad-p-mini" style={miniBtn} onClick={onExport}>⬇ 导出绑定清单</button>
+        ) : null}
+      </div>
+      <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
+        {catalog ? '型号库已载入：' + modelKeys.length + ' 款' : '未载入型号库（device-models.manifest.json）'}
+      </div>
+      {error ? <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div> : null}
+      {binding ? (
+        <div className="cad-p-layers" style={{ maxHeight: 300, marginTop: 6 }}>
+          {groups.map((g, i) => (
+            <div key={'g' + i} className="cad-p-layer">
+              <span className="nm">{g.key} → {g.type}</span>
+              {renderModelSelect(g.model, (v) => onBindChange('group', i, v))}
+              <span className="cnt">{badge(g.confidence)}</span>
+            </div>
+          ))}
+          {devices.map((d, i) => (
+            <div key={d.device_id || 'd' + i} className="cad-p-layer">
+              <span className="nm">{d.device_id} → {d.type}</span>
+              {renderModelSelect(d.model, (v) => onBindChange('device', i, v))}
+              <span className="cnt">{badge(d.confidence)}</span>
+              <button type="button" className="cad-p-mini" onClick={() => onRemove(i)}>✕</button>
+            </div>
+          ))}
+          {unmatched.length > 0 ? (
+            <div style={{ opacity: 0.6, padding: '2px 6px' }}>未识别 {unmatched.length} 项</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function StatsCard({ scene }) {
   const meta = scene.meta || {}
   const counts = {}
@@ -1426,6 +1496,105 @@ function CadSceneBuilderPanel() {
   const selectDevice = (device) => setSelection({ item: null, category: null, device })
   const selectedSet = selectedSetOf(selection)
 
+  // ── AI identification (slice A) ──
+  const [catalog, setCatalog] = useState(null)
+  const [binding, setBinding] = useState(null)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiError, setAiError] = useState(null)
+
+  const onCatalogFile = async (file) => {
+    if (!file) return
+    try {
+      setCatalog(JSON.parse(await file.text()))
+      setAiError(null)
+    } catch (e) {
+      setAiError('型号库 JSON 解析失败：' + String((e && e.message) || e))
+    }
+  }
+
+  const runIdentify = async () => {
+    if (!scene || aiBusy) return
+    setAiBusy(true)
+    setAiError(null)
+    try {
+      const response = await fetch('/api/cad-scene-builder/identify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ digest: buildDigest(scene), catalog: catalog || {} }),
+      })
+      const raw = await response.text()
+      let payload = null
+      try {
+        payload = JSON.parse(raw)
+      } catch (e) {
+        throw new Error('识别服务返回了非 JSON 响应 (HTTP ' + response.status + ')')
+      }
+      if (!response.ok || !payload || !payload.manifest) {
+        throw new Error((payload && payload.error) || ('识别服务错误 (HTTP ' + response.status + ')'))
+      }
+      setBinding(payload.manifest)
+    } catch (error) {
+      setAiError(String((error && error.message) || error))
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  const onBindChange = (kind, index, model) => {
+    setBinding((b) => {
+      if (!b) return b
+      const next = JSON.parse(JSON.stringify(b))
+      const arr = kind === 'group' ? (next.group_bindings || []) : (next.devices || [])
+      if (!arr[index]) return b
+      if (model) arr[index].model = model
+      else delete arr[index].model
+      return next
+    })
+  }
+
+  const onBindRemove = (index) => {
+    setBinding((b) => {
+      if (!b) return b
+      const next = JSON.parse(JSON.stringify(b))
+      next.devices = (next.devices || []).filter((_d, i) => i !== index)
+      return next
+    })
+  }
+
+  const exportBinding = () => {
+    if (!binding) return
+    const deviceTypes = {}
+    for (const g of binding.group_bindings || []) {
+      if (g.type && g.model && !deviceTypes[g.type]) deviceTypes[g.type] = { model: g.model }
+    }
+    const manifest = {
+      manifest_version: 1,
+      source: (scene && scene.meta && scene.meta.source) || null,
+      generated_by: 'dsh-cad-scene:ai-identify',
+      model_library: (catalog && catalog.model_library) || {},
+      device_types: deviceTypes,
+      devices: (binding.devices || []).map((d) => ({
+        device_id: d.device_id,
+        type: d.type,
+        model: d.model,
+        confidence: d.confidence,
+        evidence: d.evidence,
+      })),
+      unmatched: binding.unmatched || [],
+    }
+    const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = String(manifest.source || 'scene').replace(/\.[^.]+$/, '') + '.binding.json'
+    document.body.appendChild(a)
+    a.click()
+    setTimeout(() => {
+      a.remove()
+      URL.revokeObjectURL(url)
+    }, 2000)
+  }
+
   const acceptFile = (file) => {
     if (!file) return
     fileRef.current = file
@@ -1592,6 +1761,18 @@ function CadSceneBuilderPanel() {
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
         {scene ? <DeviceList scene={scene} selection={selection} onSelect={selectDevice} /> : null}
+        <AiIdentifyCard
+          scene={scene}
+          catalog={catalog}
+          binding={binding}
+          busy={aiBusy}
+          error={aiError}
+          onCatalog={onCatalogFile}
+          onIdentify={runIdentify}
+          onBindChange={onBindChange}
+          onRemove={onBindRemove}
+          onExport={exportBinding}
+        />
         {scene ? <StatsCard scene={scene} /> : null}
         {scene ? <ParseLog scene={scene} /> : null}
       </div>
