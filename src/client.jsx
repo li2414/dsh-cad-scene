@@ -30,10 +30,23 @@ const EMPTY_SCENE = { racks: [], aisles: [], zones: [], agvs: [], entities: [], 
 
 // ── three.js builders (DXF plan (x, y) maps to ground (x, 0, -y)) ───────────
 
+const LAYER_PALETTE = [0x60a5fa, 0xf97316, 0x34d399, 0xf472b6, 0xa78bfa, 0xfacc15, 0x22d3ee, 0xfb7185, 0x4ade80, 0x818cf8, 0xfda4af, 0x38bdf8, 0xfdba74, 0xc084fc, 0x86efac, 0xfca5a5]
+
+/** Stable identity color per layer name (when the drawing ships no color). */
+function layerPaletteColor(name) {
+  const s = String(name || '0')
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
+  return LAYER_PALETTE[h % LAYER_PALETTE.length]
+}
+
+// Layer identity wins: the drawing's own layer color, else a stable per-layer
+// palette color. Category colors are only a last resort.
 function layerColor(scene, layerName, fallback) {
   const layers = Array.isArray(scene.layers) ? scene.layers : []
   const layer = layers.find((l) => l && l.name === layerName)
-  return layer && typeof layer.color === 'number' && layer.color > 0 ? layer.color : fallback
+  if (layer && typeof layer.color === 'number' && layer.color > 0) return layer.color
+  return layerPaletteColor(layerName)
 }
 
 function shapeFrom(vertices) {
@@ -568,41 +581,35 @@ function CategorySummary({ scene }) {
 
 // ── left workbench cards ────────────────────────────────────────────────────
 
-function LegendCard({ scene, hidden, onToggle }) {
-  return (
-    <div className="cad-p-card">
-      <h4>图例 · 点击隐藏/显示</h4>
-      <div className="cad-p-legend">
-        {['racks', 'aisles', 'zones', 'agvs'].map((key) => (
-          <div key={key} className="cad-p-leg" data-off={hidden[key] ? 'true' : 'false'} onClick={() => onToggle(key)}>
-            <span className="cad-p-dot" style={{ background: hex(CATEGORY_COLORS[key]) }} />
-            <b>{CATEGORY_LABELS[key]}</b>
-            <span className="cnt">{(scene[key] || []).length}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function LayerManager({ scene, hiddenLayers, onToggleLayer }) {
-  const layers = Array.isArray(scene.layers) ? scene.layers : []
+// Legend generated from the parsed content: one entry per layer the drawing
+// actually uses, keeping the ORIGINAL names — no fixed category list. Colors
+// come from the DXF layer table when present, else a stable per-layer palette.
+function GeneratedLegend({ scene, hiddenLayers, onToggleLayer }) {
   const counts = {}
   for (const e of scene.entities || []) counts[e.layer] = (counts[e.layer] || 0) + 1
+  const table = {}
+  for (const l of scene.layers || []) table[l.name] = l
+  const used = Object.keys(counts).sort((a, b) => counts[b] - counts[a])
+  for (const l of scene.layers || []) {
+    if (counts[l.name] === undefined) used.push(l.name)
+  }
   return (
     <div className="cad-p-card">
-      <h4>图层 · {layers.length}（点击隐藏/显示）</h4>
-      <div className="cad-p-layers">
-        {layers.map((l) => (
-          <div key={l.name} className="cad-p-layer" data-off={hiddenLayers[l.name] ? 'true' : 'false'} onClick={() => onToggleLayer(l.name)}>
-            <span className="cad-p-dot" style={{ background: l.color > 0 ? hex(l.color) : '#64748b' }} />
-            <span className="nm">{l.name}</span>
-            {l.visible === false ? <span className="cad-p-badge">隐藏</span> : null}
-            {l.frozen ? <span className="cad-p-badge">冻结</span> : null}
-            <span className="cnt">{counts[l.name] || 0}</span>
-          </div>
-        ))}
-        {layers.length === 0 ? <div style={{ opacity: 0.6 }}>无图层表</div> : null}
+      <h4>图例 · 按解析内容生成（{used.length} 组）</h4>
+      <div className="cad-p-layers" style={{ maxHeight: 260 }}>
+        {used.map((name) => {
+          const l = table[name]
+          return (
+            <div key={name} className="cad-p-layer" data-off={hiddenLayers[name] ? 'true' : 'false'} onClick={() => onToggleLayer(name)}>
+              <span className="cad-p-dot" style={{ background: hex(layerColor(scene, name)) }} />
+              <span className="nm">{name}</span>
+              {l && l.visible === false ? <span className="cad-p-badge">隐藏</span> : null}
+              {l && l.frozen ? <span className="cad-p-badge">冻结</span> : null}
+              <span className="cnt">{counts[name] || 0}</span>
+            </div>
+          )
+        })}
+        {used.length === 0 ? <div style={{ opacity: 0.6 }}>无图层内容</div> : null}
       </div>
     </div>
   )
@@ -744,8 +751,6 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
     // build filtered primitives (same legend/layer filters as the 3D view)
     const cats = hiddenCats || {}
     const layersOff = hiddenLayers || {}
-    const colorOf = {}
-    for (const l of scene.layers || []) colorOf[l.name] = l.color > 0 ? hex(l.color) : '#94a3b8'
     const prims = []
     const texts = []
     const bucketByHandle = {}
@@ -761,7 +766,7 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
       if (bucketed && cats[bucketed.category]) continue
       const item = bucketed ? bucketed.item : Object.assign({ id: 'ent-' + (++synth) }, e)
       const category = bucketed ? bucketed.category : null
-      const color = colorOf[e.layer] || (category ? hex(CATEGORY_COLORS[category]) : '#94a3b8')
+      const color = hex(layerColor(scene, e.layer))
       const prim = makePrim(item, category, color)
       if (prim) prims.push(prim)
     }
@@ -774,7 +779,7 @@ function DrawingCanvas({ scene, selectedId, onSelect, hiddenCats, hiddenLayers }
           category: null,
           p: e.position || { x: 0, y: 0 },
           text: e.text,
-          color: colorOf[e.layer] || '#94a3b8',
+          color: hex(layerColor(scene, e.layer)),
         })
       }
     }
@@ -997,13 +1002,11 @@ function CadSceneBuilderPanel() {
   const [busy, setBusy] = useState(false)
   const [selection, setSelection] = useState(null)
   const [dragging, setDragging] = useState(false)
-  const [hiddenCats, setHiddenCats] = useState({})
   const [hiddenLayers, setHiddenLayers] = useState({})
   const [view2d, setView2d] = useState(false)
 
   useEffect(() => { ensureImportStyles() }, [])
 
-  const toggleCat = (key) => setHiddenCats((h) => Object.assign({}, h, { [key]: !h[key] }))
   const toggleLayer = (name) => setHiddenLayers((h) => Object.assign({}, h, { [name]: !h[name] }))
 
   const acceptFile = (file) => {
@@ -1011,7 +1014,6 @@ function CadSceneBuilderPanel() {
     fileRef.current = file
     setScene(null)
     setSelection(null)
-    setHiddenCats({})
     setHiddenLayers({})
     setFileState({ name: file.name, size: file.size, status: 'ready', error: null })
   }
@@ -1117,8 +1119,7 @@ function CadSceneBuilderPanel() {
             {busy ? '解析中…' : '解析'}
           </button>
         </div>
-        {scene ? <LegendCard scene={scene} hidden={hiddenCats} onToggle={toggleCat} /> : null}
-        {scene ? <LayerManager scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
+        {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
         {scene ? <StatsCard scene={scene} /> : null}
         {scene ? <ParseLog scene={scene} /> : null}
       </div>
@@ -1132,9 +1133,9 @@ function CadSceneBuilderPanel() {
         </div>
         <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
           {view2d ? (
-            <DrawingCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
+            <DrawingCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenLayers={hiddenLayers} />
           ) : (
-            <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenCats={hiddenCats} hiddenLayers={hiddenLayers} />
+            <SceneCanvas scene={scene || EMPTY_SCENE} selectedId={selection && selection.item ? selection.item.id : null} onSelect={setSelection} hiddenLayers={hiddenLayers} />
           )}
           {!scene ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
