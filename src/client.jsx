@@ -1572,6 +1572,13 @@ function CadSceneBuilderPanel() {
       source: (scene && scene.meta && scene.meta.source) || null,
       generated_by: 'dsh-cad-scene:ai-identify',
       model_library: (catalog && catalog.model_library) || {},
+      group_bindings: (binding.group_bindings || []).map((g) => ({
+        key: g.key,
+        type: g.type,
+        model: g.model,
+        confidence: g.confidence,
+        evidence: g.evidence,
+      })),
       device_types: deviceTypes,
       devices: (binding.devices || []).map((d) => ({
         device_id: d.device_id,
