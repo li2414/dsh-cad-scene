@@ -708,11 +708,12 @@ function InfoPanel({ scene, selection }) {
   const item = selection.item
   const category = selection.category
   const layers = Array.isArray(scene.layers) ? scene.layers : []
-  const layer = layers.find((l) => l && l.name === item.layer)
+  const scopeLayer = item ? item.layer : (dev ? dev.layer : null)
+  const layer = layers.find((l) => l && l.name === scopeLayer) || null
   const texts = (Array.isArray(scene.entities) ? scene.entities : [])
-    .filter((e) => e && (e.type === 'TEXT' || e.type === 'MTEXT') && e.layer === item.layer && e.text)
+    .filter((e) => e && (e.type === 'TEXT' || e.type === 'MTEXT') && e.layer === scopeLayer && e.text)
     .slice(0, 6)
-  const anchor = item.position || item.center || (Array.isArray(item.vertices) && item.vertices[0]) || null
+  const anchor = item ? (item.position || item.center || (Array.isArray(item.vertices) && item.vertices[0]) || null) : null
   return (
     <div style={styles.info}>
       {dev ? (
