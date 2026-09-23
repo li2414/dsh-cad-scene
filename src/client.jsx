@@ -476,8 +476,16 @@ async function parseFile(file, onPhase) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: file.name, content: await fileToBase64(file) }),
     })
-    const payload = await response.json()
-    if (!response.ok || !payload.scene) throw new Error(payload.error || ('HTTP ' + response.status))
+    const raw = await response.text()
+    let payload = null
+    try {
+      payload = JSON.parse(raw)
+    } catch (e) {
+      throw new Error('解析服务返回了非 JSON 响应 (HTTP ' + response.status + ')：' + String(raw).slice(0, 100) + '（路由未生效时请重启 dsh web）')
+    }
+    if (!response.ok || !payload || !payload.scene) {
+      throw new Error((payload && payload.error) || ('解析服务错误 (HTTP ' + response.status + ')'))
+    }
     return payload.scene
   }
   const text = await file.text()
