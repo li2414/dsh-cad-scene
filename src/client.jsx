@@ -16,7 +16,7 @@
  * An ErrorBoundary wraps every registered component so a render failure shows
  * the error instead of a blank page.
  */
-import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { parseDxfToScene, buildDigest } from './scene-core.mjs'
@@ -724,6 +724,49 @@ function ensureImportStyles() {
 function hex(color) {
   return '#' + (color >>> 0).toString(16).padStart(6, '0')
 }
+
+// ── panel session store ─────────────────────────────────────────────────────
+// The main panel slot unmounts when the user switches to the conversation and
+// remounts on return, so component state would be lost every round trip.
+// Panel state therefore lives here (module-level, one per page load) and the
+// component subscribes through useSyncExternalStore — the same
+// store-not-component pattern the shipped conversation UI relies on.
+
+const panelStore = {
+  state: {
+    file: null,
+    fileState: null,
+    scene: null,
+    busy: false,
+    selection: null,
+    hiddenLayers: {},
+    dxfDownload: null,
+    view2d: false,
+    catalog: null,
+    binding: null,
+    aiBusy: false,
+    aiError: null,
+  },
+  listeners: new Set(),
+  set(patch) {
+    this.state = Object.assign({}, this.state, patch)
+    for (const listener of this.listeners) listener()
+  },
+  subscribe(listener) {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  },
+}
+
+function usePanelStore() {
+  return useSyncExternalStore(
+    (listener) => panelStore.subscribe(listener),
+    () => panelStore.state,
+  )
+}
+
+// setters accept both plain values and functional updates
+const panelSetter = (key) => (value) => panelStore.set({ [key]: typeof value === 'function' ? value(panelStore.state[key]) : value })
 
 class PanelErrorBoundary extends Component {
   constructor(props) {
@@ -1470,16 +1513,31 @@ function DrawingCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) 
 }
 
 function CadSceneBuilderPanel() {
-  const [fileState, setFileState] = useState(null)
-  const fileRef = useRef(null)
+  const st = usePanelStore()
+  const fileState = st.fileState
+  const scene = st.scene
+  const busy = st.busy
+  const selection = st.selection
+  const hiddenLayers = st.hiddenLayers
+  const dxfDownload = st.dxfDownload
+  const view2d = st.view2d
+  const catalog = st.catalog
+  const binding = st.binding
+  const aiBusy = st.aiBusy
+  const aiError = st.aiError
+  const setFileState = panelSetter('fileState')
+  const setScene = panelSetter('scene')
+  const setBusy = panelSetter('busy')
+  const setSelection = panelSetter('selection')
+  const setHiddenLayers = panelSetter('hiddenLayers')
+  const setDxfDownload = panelSetter('dxfDownload')
+  const setView2d = panelSetter('view2d')
+  const setCatalog = panelSetter('catalog')
+  const setBinding = panelSetter('binding')
+  const setAiBusy = panelSetter('aiBusy')
+  const setAiError = panelSetter('aiError')
   const inputRef = useRef(null)
-  const [scene, setScene] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [selection, setSelection] = useState(null)
   const [dragging, setDragging] = useState(false)
-  const [hiddenLayers, setHiddenLayers] = useState({})
-  const [dxfDownload, setDxfDownload] = useState(null)
-  const [view2d, setView2d] = useState(false)
 
   useEffect(() => { ensureImportStyles() }, [])
 
@@ -1496,11 +1554,7 @@ function CadSceneBuilderPanel() {
   const selectDevice = (device) => setSelection({ item: null, category: null, device })
   const selectedSet = selectedSetOf(selection)
 
-  // ── AI identification (slice A) ──
-  const [catalog, setCatalog] = useState(null)
-  const [binding, setBinding] = useState(null)
-  const [aiBusy, setAiBusy] = useState(false)
-  const [aiError, setAiError] = useState(null)
+  // ── AI identification (slice A) — state rides the panel store ──
 
   const onCatalogFile = async (file) => {
     if (!file) return
@@ -1604,7 +1658,7 @@ function CadSceneBuilderPanel() {
 
   const acceptFile = (file) => {
     if (!file) return
-    fileRef.current = file
+    panelStore.set({ file })
     setScene(null)
     setSelection(null)
     setHiddenLayers({})
@@ -1613,7 +1667,7 @@ function CadSceneBuilderPanel() {
   }
 
   const runParse = async () => {
-    const file = fileRef.current
+    const file = panelStore.state.file
     if (!file || busy) return
     setBusy(true)
     setFileState((s) => Object.assign({}, s, { status: 'parsing', error: null }))
