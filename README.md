@@ -49,6 +49,10 @@ dsh plugin --profile web add link:E:/path/to/dsh-cad-scene
 
 `.step` 暂不支持，会给出明确提示。
 
+## 设计文档 / Design docs
+
+- [AI 设备识别优化建议大纲](docs/ai-recognition-optimization-outline.md)：识别准确率三层路线、三方服务评估、RAG/向量库决策与 P0–P2 落地路线
+
 ## 开发 / Development
 
 ```sh
