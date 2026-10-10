@@ -1705,7 +1705,7 @@ function CadSceneBuilderPanel() {
     setBusy(true)
     setFileState((s) => Object.assign({}, s, { status: 'parsing', error: null }))
     try {
-      const res = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })))
+      const res = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })), { tolerance: clusterTol, maxPerDevice: clusterCap })
       setScene(res.scene)
       setDxfDownload(res.download || null)
       setFileState((s) => Object.assign({}, s, { status: 'done' }))

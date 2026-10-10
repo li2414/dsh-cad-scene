@@ -10,7 +10,7 @@ self.onmessage = (event) => {
   const data = event.data || {}
   try {
     self.postMessage({ phase: '解析中 · 图元扫描' })
-    const scene = parseDxfToScene(String(data.content || ''), data.name || 'drawing.dxf', data.format || 'dxf')
+    const scene = parseDxfToScene(String(data.content || ''), data.name || 'drawing.dxf', data.format || 'dxf', data.clusterOptions)
     self.postMessage({ done: true, scene })
   } catch (error) {
     self.postMessage({ done: true, error: String((error && error.message) || error) })
