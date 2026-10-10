@@ -19,6 +19,8 @@
 import { Component, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { parseDxfToScene, buildDigest } from './scene-core.mjs'
 
 const inject = ['slots']
@@ -159,7 +161,7 @@ function buildItemObject(item, category, scene, hs) {
 
 // ── three.js canvas ─────────────────────────────────────────────────────────
 
-function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
+function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers, models, binding, showRealModels }) {
   const hostRef = useRef(null)
   const pickablesRef = useRef([])
 
@@ -233,6 +235,15 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
 
     // block devices: ONE InstancedMesh per blockName (logical devices stay
     // independent through userData.instanceDevices[instanceId] -> device)
+    const bindingMap = new Map()
+    if (binding) {
+      for (const g of binding.group_bindings || []) {
+        if (g.key && g.model) bindingMap.set(g.key, g.model)
+      }
+      for (const d of binding.devices || []) {
+        if (d.device_id && d.model) bindingMap.set(d.device_id, d.model)
+      }
+    }
     for (const [blockName, list] of instByBlock) {
       void blockName
       const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial(), list.length)
@@ -268,6 +279,41 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       }
       group.add(mesh)
       pickables.push(mesh)
+    }
+
+    // Real model replacement: per-device FBX/GLB clones at binding anchors
+    if (showRealModels && models && models.size > 0 && bindingMap.size > 0) {
+      const layerOff = hiddenLayers || {}
+      for (const d of devices) {
+        if (layerOff[d.layer]) continue
+        const modelKey = bindingMap.get(d.device_id) || bindingMap.get(d.layer)
+        if (!modelKey) continue
+        const prototype = models.get(modelKey)
+        if (!prototype) continue
+        const clone = prototype.clone(true)
+        const bb = d.bounding_box
+        const bw = bb ? Math.max(bb.max[0] - bb.min[0], 0.1) : 1
+        const bd = bb ? Math.max(bb.max[1] - bb.min[1], 0.1) : 1
+        const ml = (binding.model_library && binding.model_library[modelKey]) || {}
+        const uh = Array.isArray(ml.size_hint) ? ml.size_hint : [1, 1, 1]
+        const sx = uh[0] > 0 ? bw / uh[0] : 1
+        const sz = uh[2] > 0 ? bd / uh[2] : 1
+        const sy = Math.max(sx, sz)
+        const ctr = d.center || [0, 0, 0]
+        const rot = (d.rotation || 0) + (ml.rotation_offset_deg || 0)
+        clone.scale.setScalar(sy)
+        clone.position.set(ctr[0], 0, -ctr[1])
+        clone.rotation.y = -(rot * Math.PI) / 180
+        clone.traverse((child) => {
+          if (child.isMesh) {
+            child.material = child.material.clone()
+            child.material.emissive = new THREE.Color(selSet.has(d.id) ? 0x444400 : 0x000000)
+          }
+          child.userData.device = d
+        })
+        group.add(clone)
+        pickables.push(clone)
+      }
     }
 
     // layer-group and isolated devices: merged into ONE curtain mesh per
@@ -488,7 +534,7 @@ function SceneCanvas({ scene, selected, onSelect, hiddenCats, hiddenLayers }) {
       if (renderer.domElement.parentNode === host) host.removeChild(renderer.domElement)
       pickablesRef.current = []
     }
-  }, [scene, hiddenCats, hiddenLayers])
+  }, [scene, hiddenCats, hiddenLayers, models, binding, showRealModels])
 
   useEffect(() => {
     for (const object of pickablesRef.current) {
@@ -1063,11 +1109,12 @@ function DeviceList({ scene, selection, onSelect }) {
 
 // ── AI device recognition ───────────────────────────────────────────────────
 
-function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIdentify, onBindChange, onRemove, onExport }) {
+function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIdentify, onBindChange, onRemove, onExport, modelFiles, showRealModels, onModelFiles, onToggleReal }) {
   const modelKeys = catalog && catalog.model_library ? Object.keys(catalog.model_library) : []
   const groups = binding && binding.group_bindings ? binding.group_bindings : []
   const devices = binding && binding.devices ? binding.devices : []
   const unmatched = binding && binding.unmatched ? binding.unmatched : []
+  const loadedModels = modelFiles ? modelFiles.size : 0
   const badge = (c) => (c == null ? '' : c >= 0.75 ? '高' : c >= 0.5 ? '中' : '待确认')
   const sizeWarn = (evidence) => Array.isArray(evidence) && evidence.some((e) => typeof e === 'string' && e.startsWith('size-check'))
   const miniBtn = { width: 'auto', padding: '3px 10px', display: 'inline-flex' }
@@ -1098,12 +1145,28 @@ function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIde
         <button type="button" className="cad-p-mini" style={miniBtn} disabled={!scene || busy} onClick={onIdentify}>
           {busy ? '识别中…' : 'AI 识别设备'}
         </button>
+        <label className="cad-p-mini" style={{ ...miniBtn, cursor: 'pointer' }}>
+          载入模型
+          <input
+            type="file"
+            accept=".fbx,.glb,.gltf"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => { onModelFiles(e.target.files); e.target.value = '' }}
+          />
+        </label>
+        {loadedModels > 0 ? (
+          <button type="button" className="cad-p-mini" style={miniBtn} onClick={onToggleReal}>
+            {showRealModels ? '显示占位' : '显示真实模型'}
+          </button>
+        ) : null}
         {binding ? (
           <button type="button" className="cad-p-mini" style={miniBtn} onClick={onExport}>⬇ 导出绑定清单</button>
         ) : null}
       </div>
       <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
         {catalog ? '型号库已载入：' + modelKeys.length + ' 款' : '未载入型号库（device-models.manifest.json）'}
+        {loadedModels > 0 ? ' · 3D 模型已载入：' + loadedModels + ' 款' : ''}
       </div>
       {error ? <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div> : null}
       {binding ? (
@@ -1530,6 +1593,9 @@ function CadSceneBuilderPanel() {
   const aiError = st.aiError
   const clusterTol = st.clusterTol != null ? st.clusterTol : 1
   const clusterCap = st.clusterCap != null ? st.clusterCap : 200
+  const models = st.models || new Map()
+  const modelFiles = st.modelFiles || new Map()
+  const showRealModels = st.showRealModels !== false
   const setFileState = panelSetter('fileState')
   const setScene = panelSetter('scene')
   const setBusy = panelSetter('busy')
@@ -1543,6 +1609,9 @@ function CadSceneBuilderPanel() {
   const setAiError = panelSetter('aiError')
   const setClusterTol = panelSetter('clusterTol')
   const setClusterCap = panelSetter('clusterCap')
+  const setModels = panelSetter('models')
+  const setModelFiles = panelSetter('modelFiles')
+  const setShowRealModels = panelSetter('showRealModels')
   const inputRef = useRef(null)
   const [dragging, setDragging] = useState(false)
 
@@ -1560,6 +1629,32 @@ function CadSceneBuilderPanel() {
   }
   const selectDevice = (device) => setSelection({ item: null, category: null, device })
   const selectedSet = selectedSetOf(selection)
+
+  const loadModelFiles = async (files) => {
+    const newModels = new Map(panelStore.state.models)
+    const newFiles = new Map(panelStore.state.modelFiles)
+    for (const file of files || []) {
+      const key = file.name.replace(/\.[^.]+$/, '').toLowerCase()
+      try {
+        let model
+        if (/\.fbx$/i.test(file.name)) {
+          const buffer = await file.arrayBuffer()
+          model = new FBXLoader().parse(buffer, '')
+        } else if (/\.(glb|gltf)$/i.test(file.name)) {
+          const buffer = await file.arrayBuffer()
+          model = await new Promise((res, rej) => new GLTFLoader().parse(buffer, '', (g) => res(g.scene), rej))
+        } else {
+          continue
+        }
+        newModels.set(key, model)
+        newFiles.set(key, file.name)
+      } catch (error) {
+        setAiError('模型加载失败：' + file.name + ' — ' + String((error && error.message) || error))
+      }
+    }
+    setModels(newModels)
+    setModelFiles(newFiles)
+  }
 
   const handleReparse = async () => {
     const file = panelStore.state.file
@@ -1586,6 +1681,9 @@ function CadSceneBuilderPanel() {
     setClusterCap(v)
     if (panelStore.state.scene) handleReparse()
   }
+
+  const handleModelFiles = (files) => loadModelFiles(files)
+  const handleToggleReal = () => setShowRealModels(!showRealModels)
 
   // ── AI identification (slice A) — state rides the panel store ──
 
@@ -1899,6 +1997,10 @@ function CadSceneBuilderPanel() {
           onBindChange={onBindChange}
           onRemove={onBindRemove}
           onExport={exportBinding}
+          modelFiles={modelFiles}
+          showRealModels={showRealModels}
+          onModelFiles={handleModelFiles}
+          onToggleReal={handleToggleReal}
         />
         {scene ? <StatsCard scene={scene} /> : null}
         {scene ? <ParseLog scene={scene} /> : null}
@@ -1915,7 +2017,7 @@ function CadSceneBuilderPanel() {
           {view2d ? (
             <DrawingCanvas scene={scene || EMPTY_SCENE} selected={selectedSet} onSelect={handleSelect} hiddenLayers={hiddenLayers} />
           ) : (
-            <SceneCanvas scene={scene || EMPTY_SCENE} selected={selectedSet} onSelect={handleSelect} hiddenLayers={hiddenLayers} />
+            <SceneCanvas scene={scene || EMPTY_SCENE} selected={selectedSet} onSelect={handleSelect} hiddenLayers={hiddenLayers} models={models} binding={binding} showRealModels={showRealModels} />
           )}
           {!scene ? (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 12, pointerEvents: 'none', fontSize: 12, opacity: 0.7 }}>
