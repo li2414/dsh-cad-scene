@@ -513,13 +513,13 @@ async function fileToBase64(file) {
   return btoa(binary)
 }
 
-function runWorkerParse(name, content, format, onPhase) {
+function runWorkerParse(name, content, format, onPhase, clusterOptions) {
   return new Promise((resolve, reject) => {
     const phase = typeof onPhase === 'function' ? onPhase : () => {}
     if (typeof Worker === 'undefined' || typeof __CAD_WORKER_SOURCE__ !== 'string') {
       phase('解析中 · 主线程回退')
       try {
-        resolve(parseDxfToScene(content, name, format))
+        resolve(parseDxfToScene(content, name, format, clusterOptions))
       } catch (error) {
         reject(error)
       }
@@ -560,11 +560,11 @@ function runWorkerParse(name, content, format, onPhase) {
         reject(error)
       }
     }
-    worker.postMessage({ name, content, format })
+    worker.postMessage({ name, content, format, clusterOptions })
   })
 }
 
-async function parseFile(file, onPhase) {
+async function parseFile(file, onPhase, clusterOptions) {
   const phase = typeof onPhase === 'function' ? onPhase : () => {}
   if (/\.(dwg|step|stp)$/i.test(file.name)) {
     phase('上传中 · Host 转换解析')
@@ -586,7 +586,7 @@ async function parseFile(file, onPhase) {
     return { scene: payload.scene, download: payload.download || null }
   }
   const text = await file.text()
-  const scene = await runWorkerParse(file.name, text, 'dxf', phase)
+  const scene = await runWorkerParse(file.name, text, 'dxf', phase, clusterOptions)
   return { scene, download: null }
 }
 
@@ -1069,6 +1069,7 @@ function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIde
   const devices = binding && binding.devices ? binding.devices : []
   const unmatched = binding && binding.unmatched ? binding.unmatched : []
   const badge = (c) => (c == null ? '' : c >= 0.75 ? '高' : c >= 0.5 ? '中' : '待确认')
+  const sizeWarn = (evidence) => Array.isArray(evidence) && evidence.some((e) => typeof e === 'string' && e.startsWith('size-check'))
   const miniBtn = { width: 'auto', padding: '3px 10px', display: 'inline-flex' }
   const renderModelSelect = (value, onPick) => (
     <select
@@ -1112,6 +1113,7 @@ function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIde
               <span className="nm">{g.key} → {g.type}</span>
               {renderModelSelect(g.model, (v) => onBindChange('group', i, v))}
               <span className="cnt">{badge(g.confidence)}</span>
+              {sizeWarn(g.evidence) ? <span className="cad-p-badge" style={{ color: '#fbbf24' }}>缩放可疑</span> : null}
             </div>
           ))}
           {devices.map((d, i) => (
@@ -1119,6 +1121,7 @@ function AiIdentifyCard({ scene, catalog, binding, busy, error, onCatalog, onIde
               <span className="nm">{d.device_id} → {d.type}</span>
               {renderModelSelect(d.model, (v) => onBindChange('device', i, v))}
               <span className="cnt">{badge(d.confidence)}</span>
+              {sizeWarn(d.evidence) ? <span className="cad-p-badge" style={{ color: '#fbbf24' }}>缩放可疑</span> : null}
               <button type="button" className="cad-p-mini" onClick={() => onRemove(i)}>✕</button>
             </div>
           ))}
@@ -1525,6 +1528,8 @@ function CadSceneBuilderPanel() {
   const binding = st.binding
   const aiBusy = st.aiBusy
   const aiError = st.aiError
+  const clusterTol = st.clusterTol != null ? st.clusterTol : 1
+  const clusterCap = st.clusterCap != null ? st.clusterCap : 200
   const setFileState = panelSetter('fileState')
   const setScene = panelSetter('scene')
   const setBusy = panelSetter('busy')
@@ -1536,6 +1541,8 @@ function CadSceneBuilderPanel() {
   const setBinding = panelSetter('binding')
   const setAiBusy = panelSetter('aiBusy')
   const setAiError = panelSetter('aiError')
+  const setClusterTol = panelSetter('clusterTol')
+  const setClusterCap = panelSetter('clusterCap')
   const inputRef = useRef(null)
   const [dragging, setDragging] = useState(false)
 
@@ -1553,6 +1560,32 @@ function CadSceneBuilderPanel() {
   }
   const selectDevice = (device) => setSelection({ item: null, category: null, device })
   const selectedSet = selectedSetOf(selection)
+
+  const handleReparse = async () => {
+    const file = panelStore.state.file
+    if (!file) return
+    setBusy(true)
+    try {
+      const res = await parseFile(file, (phase) => setFileState((s) => Object.assign({}, s, { phase })), { tolerance: clusterTol, maxPerDevice: clusterCap })
+      setScene(res.scene)
+      setDxfDownload(res.download || null)
+      setFileState((s) => Object.assign({}, s, { status: 'done' }))
+    } catch (error) {
+      setFileState((s) => Object.assign({}, s, { status: 'error', error: String((error && error.message) || error) }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onTolChange = (v) => {
+    setClusterTol(v)
+    if (panelStore.state.scene) handleReparse()
+  }
+
+  const onCapChange = (v) => {
+    setClusterCap(v)
+    if (panelStore.state.scene) handleReparse()
+  }
 
   // ── AI identification (slice A) — state rides the panel store ──
 
@@ -1821,6 +1854,39 @@ function CadSceneBuilderPanel() {
           ) : null}
         </div>
         {scene ? <GeneratedLegend scene={scene} hiddenLayers={hiddenLayers} onToggleLayer={toggleLayer} /> : null}
+        {scene ? (
+          <div className="cad-p-card">
+            <h4>聚类灵敏度</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <span style={{ fontSize: 11, opacity: 0.7 }}>间距容差 ×</span>
+              <input
+                className="cad-p-edit-input"
+                style={{ flex: 1 }}
+                type="range"
+                min="0.1"
+                max="5"
+                step="0.1"
+                value={clusterTol}
+                onChange={(e) => onTolChange(Number(e.target.value))}
+              />
+              <span className="cnt">{clusterTol.toFixed(1)}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, opacity: 0.7 }}>单簇上限</span>
+              <input
+                className="cad-p-edit-input"
+                style={{ flex: 1 }}
+                type="range"
+                min="20"
+                max="1000"
+                step="20"
+                value={clusterCap}
+                onChange={(e) => onCapChange(Number(e.target.value))}
+              />
+              <span className="cnt">{clusterCap}</span>
+            </div>
+          </div>
+        ) : null}
         {scene ? <DeviceList scene={scene} selection={selection} onSelect={selectDevice} /> : null}
         <AiIdentifyCard
           scene={scene}

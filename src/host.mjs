@@ -263,30 +263,90 @@ async function handleIdentify(req, res, deps) {
   if (!route) route = deps.defaultRoute()
   if (!route) return writeJson(res, 503, { ok: false, code: 'no-model', error: 'no model route available (set config.model or pass model as "provider/model")' })
 
-  const userText = 'DIGEST:\n' + JSON.stringify(digest) + '\n\nCATALOG:\n' + JSON.stringify(payload.catalog && typeof payload.catalog === 'object' ? payload.catalog : {})
-  const timeout = new AbortController()
-  const timer = setTimeout(() => { timeout.abort() }, IDENTIFY_TIMEOUT_MS)
-  try {
-    const options = {
-      provider: route.provider,
-      model: route.model,
-      system: IDENTIFY_SYSTEM_PROMPT,
-      messages: [identifyUserMessage(userText)],
-      signal: timeout.signal,
+  // Size cross-validation helper: model size_hint vs digest bbox_typical.
+  const catalog = payload.catalog && typeof payload.catalog === 'object' ? payload.catalog : {}
+  const sizeCheck = (binding) => {
+    if (!binding || !binding.model || !catalog.model_library) return binding
+    const ml = catalog.model_library[binding.model]
+    if (!ml || !Array.isArray(ml.size_hint) || ml.size_hint.length < 2) return binding
+    const key = binding.key || binding.device_id
+    const grp = (digest.groups || []).find((g) => g.key === key)
+    if (!grp || !Array.isArray(grp.bbox_typical) || grp.bbox_typical.length < 2) return binding
+    const [hw, hd] = ml.size_hint
+    const [gw, gd] = grp.bbox_typical
+    if (gw <= 0 || gd <= 0) return binding
+    const wRatio = Math.abs(hw - gw) / gw
+    const dRatio = Math.abs(hd - gd) / gd
+    if (wRatio > 0.5 || dRatio > 0.5) {
+      binding.confidence = Math.min(binding.confidence != null ? binding.confidence : 0.5, 0.5)
+      binding.evidence = (binding.evidence || []).concat(['size-check: hint ' + hw + '×' + hd + ' vs bbox ' + gw + '×' + gd + ' (ratio >50%)'])
     }
-    let reply = ''
-    for await (const chunk of llm.stream(options)) {
-      if (chunk && chunk.type === 'text-delta') reply += chunk.text
-    }
-    const manifest = extractJsonReply(reply)
-    if (!manifest) return writeJson(res, 502, { ok: false, code: 'parse-failed', error: 'the model reply was not valid JSON' })
-    return writeJson(res, 200, { ok: true, manifest })
-  } catch (error) {
-    if (timeout.signal.aborted) return writeJson(res, 504, { ok: false, code: 'timeout', error: 'the model did not answer within ' + IDENTIFY_TIMEOUT_MS / 1000 + 's' })
-    return writeJson(res, 502, { ok: false, code: 'model-error', error: error && error.message ? error.message : String(error) })
-  } finally {
-    clearTimeout(timer)
+    return binding
   }
+
+  // Self-consistency: sample 3 times, confidence = agreement ratio.
+  const SAMPLES = 3
+  const manifests = []
+  for (let s = 0; s < SAMPLES; s++) {
+    const userText = 'DIGEST:\n' + JSON.stringify(digest) + '\n\nCATALOG:\n' + JSON.stringify(catalog) + '\n\nSAMPLE ' + (s + 1) + '/' + SAMPLES + ' — produce the binding JSON.'
+    const timeout = new AbortController()
+    const timer = setTimeout(() => { timeout.abort() }, IDENTIFY_TIMEOUT_MS)
+    try {
+      const options = {
+        provider: route.provider,
+        model: route.model,
+        system: IDENTIFY_SYSTEM_PROMPT,
+        messages: [identifyUserMessage(userText)],
+        signal: timeout.signal,
+      }
+      let reply = ''
+      for await (const chunk of llm.stream(options)) {
+        if (chunk && chunk.type === 'text-delta') reply += chunk.text
+      }
+      const manifest = extractJsonReply(reply)
+      if (manifest) manifests.push(manifest)
+    } catch (error) {
+      if (timeout.signal.aborted) return writeJson(res, 504, { ok: false, code: 'timeout', error: 'the model did not answer within ' + IDENTIFY_TIMEOUT_MS / 1000 + 's (sample ' + (s + 1) + ')' })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  if (manifests.length === 0) return writeJson(res, 502, { ok: false, code: 'parse-failed', error: 'the model reply was not valid JSON in any sample' })
+
+  // Merge samples: group_bindings keyed by .key, devices keyed by .device_id.
+  const groupVotes = new Map()
+  const deviceVotes = new Map()
+  for (const m of manifests) {
+    for (const g of m.group_bindings || []) {
+      if (!g.key) continue
+      const voteKey = g.key + '|' + g.type + '|' + g.model
+      if (!groupVotes.has(voteKey)) groupVotes.set(voteKey, { key: g.key, type: g.type, model: g.model, votes: 0, evidence: g.evidence || [] })
+      groupVotes.get(voteKey).votes++
+    }
+    for (const d of m.devices || []) {
+      if (!d.device_id) continue
+      const voteKey = d.device_id + '|' + d.type + '|' + d.model
+      if (!deviceVotes.has(voteKey)) deviceVotes.set(voteKey, { device_id: d.device_id, type: d.type, model: d.model, votes: 0, evidence: d.evidence || [] })
+      deviceVotes.get(voteKey).votes++
+    }
+  }
+  const group_bindings = Array.from(groupVotes.values()).map((v) => ({
+    key: v.key, type: v.type, model: v.model,
+    confidence: v.votes / SAMPLES,
+    evidence: v.evidence,
+  }))
+  const devices = Array.from(deviceVotes.values()).map((v) => ({
+    device_id: v.device_id, type: v.type, model: v.model,
+    confidence: v.votes / SAMPLES,
+    evidence: v.evidence,
+  }))
+  const unmatched = manifests[0].unmatched || []
+  const manifest = { group_bindings, devices, unmatched }
+  // Apply size cross-validation after merge
+  for (const g of manifest.group_bindings) sizeCheck(g)
+  for (const d of manifest.devices) sizeCheck(d)
+
+  return writeJson(res, 200, { ok: true, manifest, samples: manifests.length })
 }
 
 // ── parse_cad_to_scene tool (plain ToolDefinition, global registration) ─────
